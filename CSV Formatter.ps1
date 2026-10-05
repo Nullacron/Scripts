@@ -33,8 +33,8 @@ foreach ($line in $lines) {
 
     if ($trimmed -match '^"([^"]+)",(?:"([^"]*)"|([^,]*))(?:,(.*))?$') {
         $name   = $matches[1].Trim()
-        $rawVal = if ($matches[2] -ne $null) { $matches[2].Trim() } else { $matches[3].Trim() }
-        $rest   = if ($matches[4] -ne $null) { $matches[4].Trim() } else { "" }
+        $rawVal = if ($null -ne $matches[2]) { $matches[2].Trim() } else { $matches[3].Trim() }
+        $rest   = if ($null -ne $matches[4]) { $matches[4].Trim() } else { "" }
 
         $isCommand  = ($rawVal.ToLower() -eq 'cmd')
         $defaultVal = if (-not $isCommand) { $rawVal } else { "" }
