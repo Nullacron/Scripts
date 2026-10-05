@@ -16,13 +16,13 @@ $flagsToIgnoreCompletely = [ordered]@{
 }
 
 # 3. Section Priority & Order (Top to Bottom)
-# Unmatched items automatically fall into an internal GENERAL section.
-$sectionConfig = [ordered]@{
-    "notify"     = @{ Title = "NOTIFY";                    Aliases = @("notify", "nf") }
-    "replicated" = @{ Title = "REPLICATED";                Aliases = @("replicated", "rep") }
-    "archive"    = @{ Title = "ARCHIVE (Saved to config)"; Aliases = @("archive", "a") }
-    "userinfo"   = @{ Title = "USER INFO";                 Aliases = @("userinfo", "user") }
-}
+# Titles are automatically capitalized; unmatched items fall into GENERAL.
+$sectionConfig = @(
+    "notify",
+    "replicated",
+    "archive",
+    "userinfo"
+)
 
 # 4. Comment Options
 $omitSectionFlagFromComments = $true
@@ -30,12 +30,6 @@ $omitSectionFlagFromComments = $true
 # =========================================================================
 # SCRIPT EXECUTION ENGINE
 # =========================================================================
-
-$internalCommonFlagsToOmit = @(
-    "client", "clientdll", "cl",
-    "server", "serverdll", "sv",
-    "game", "gamedll"
-)
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -81,6 +75,10 @@ $mainCommands  = [System.Collections.Generic.List[object]]::new()
 $ignoredCount  = 0
 $totalParsed   = 0
 
+$lineRegex   = [regex]::new('^"([^"]+)",(?:"([^"]*)"|([^,]*))(?:,(.*))?$', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$helpRegex   = [regex]::new('^(.*),"(.*)"\s*$', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$singleRegex = [regex]::new('^"(.*)"$', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+
 $lines = Get-Content -Encoding UTF8 $targetFile.FullName
 
 foreach ($line in $lines) {
@@ -88,22 +86,27 @@ foreach ($line in $lines) {
     if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
     if ($trimmed -match '^(Command|Name|cvar|#|---|cvar list)') { continue }
 
-    if ($trimmed -match '^"([^"]+)",(?:"([^"]*)"|([^,]*))(?:,(.*))?$') {
-        $name   = $matches[1].Trim()
-        $rawVal = if ($matches[2] -ne $null) { $matches[2].Trim() } else { $matches[3].Trim() }
-        $rest   = if ($matches[4] -ne $null) { $matches[4].Trim() } else { "" }
+    $m = $lineRegex.Match($trimmed)
+    if ($m.Success) {
+        $name   = $m.Groups[1].Value.Trim()
+        $rawVal = if ($m.Groups[2].Success) { $m.Groups[2].Value.Trim() } elseif ($m.Groups[3].Success) { $m.Groups[3].Value.Trim() } else { "" }
+        $rest   = if ($m.Groups[4].Success) { $m.Groups[4].Value.Trim() } else { "" }
 
         $isCommand  = ($rawVal.ToLower() -eq 'cmd')
         $defaultVal = if (-not $isCommand) { $rawVal } else { "" }
 
-        $middle = $rest
+        $middle   = $rest
         $helpText = ""
-        if ($rest -match '^(.*),"(.*)"\s*$') {
-            $middle   = $matches[1]
-            $helpText = $matches[2].Trim()
-        } elseif ($rest -match '^"(.*)"$') {
-            $middle   = ""
-            $helpText = $matches[1].Trim()
+        $hm = $helpRegex.Match($rest)
+        if ($hm.Success) {
+            $middle   = $hm.Groups[1].Value
+            $helpText = $hm.Groups[2].Value.Trim()
+        } else {
+            $sm = $singleRegex.Match($rest)
+            if ($sm.Success) {
+                $middle   = ""
+                $helpText = $sm.Groups[1].Value.Trim()
+            }
         }
 
         $flagTokens = @()
@@ -139,7 +142,7 @@ foreach ($line in $lines) {
 
         $matchedExtractKey = $null
         foreach ($extKey in $extractedFiles.Keys) {
-            if ($flagTokens -contains $extKey -or $flagTokens -contains ($extKey + "s")) {
+            if ($flagTokens -contains $extKey) {
                 $matchedExtractKey = $extKey
                 break
             }
@@ -179,50 +182,38 @@ function Export-AlignedSectionedCfg {
         [string]$outputPath,
         [bool]$isCommand,
         [string]$label,
-        [hashtable]$customSectionMap = $null,
-        [array]$extraOmitFlags = @()
+        [string]$customSection = ""
     )
 
     Write-Host "`n[*] Writing $outputPath ($label)..." -ForegroundColor Cyan
 
-    $activeSections = [ordered]@{}
-    if ($customSectionMap) {
-        foreach ($k in $customSectionMap.Keys) { $activeSections[$k] = $customSectionMap[$k] }
-    } else {
-        foreach ($k in $sectionConfig.Keys) { $activeSections[$k] = $sectionConfig[$k] }
-        $activeSections["general"] = @{ Title = "GENERAL"; Aliases = @() }
-    }
+    $activeSections = if ($customSection) { @($customSection) } else { @($sectionConfig) + "general" }
 
     $buckets = [ordered]@{}
-    foreach ($secKey in $activeSections.Keys) {
+    foreach ($secKey in $activeSections) {
         $buckets[$secKey] = [System.Collections.Generic.List[object]]::new()
     }
 
     foreach ($item in $items) {
         $assigned = $false
-        foreach ($secKey in $activeSections.Keys) {
+        foreach ($secKey in $activeSections) {
             if ($secKey -eq "general") { continue }
-            $aliases = $activeSections[$secKey].Aliases
-            foreach ($alias in $aliases) {
-                if ($item.flags -contains $alias) {
-                    $buckets[$secKey].Add($item)
-                    $assigned = $true
-                    break
-                }
+            if ($item.flags -contains $secKey) {
+                $buckets[$secKey].Add($item)
+                $assigned = $true
+                break
             }
-            if ($assigned) { break }
         }
-        if (-not $assigned) {
+        if (-not $assigned -and $buckets.Contains("general")) {
             $buckets["general"].Add($item)
         }
     }
 
-    if (-not $customSectionMap) {
-        foreach ($secKey in $activeSections.Keys) {
+    if (-not $customSection) {
+        foreach ($secKey in $activeSections) {
             $count = $buckets[$secKey].Count
             if ($count -gt 0) {
-                $tag = $activeSections[$secKey].Title.Split(' ')[0]
-                Write-Host ("    [{0,-10}] {1,4} items" -f $tag, $count) -ForegroundColor DarkGray
+                Write-Host ("    {0,-14} {1,4} items" -f "[$($secKey.ToUpper())]", $count) -ForegroundColor DarkGray
             }
         }
     }
@@ -230,14 +221,13 @@ function Export-AlignedSectionedCfg {
     $formattedBuckets = [ordered]@{}
     $maxBaseLen = 0
 
-    foreach ($secKey in $activeSections.Keys) {
+    foreach ($secKey in $activeSections) {
         $secItems = $buckets[$secKey] | Sort-Object { $_.name.ToLower() }
         $formattedList = [System.Collections.Generic.List[object]]::new()
 
-        $omitList = @($internalCommonFlagsToOmit)
-        if ($extraOmitFlags) { $omitList += $extraOmitFlags }
-        if ($omitSectionFlagFromComments -and $secKey -ne "general" -and $activeSections[$secKey].Aliases) {
-            $omitList += $activeSections[$secKey].Aliases
+        $omitList = @("client", "game", "cl", "sv")
+        if ($omitSectionFlagFromComments -and $secKey -ne "general") {
+            $omitList += $secKey
         }
 
         foreach ($item in $secItems) {
@@ -287,7 +277,7 @@ function Export-AlignedSectionedCfg {
 
     $outputLines = [System.Collections.Generic.List[string]]::new()
 
-    foreach ($secKey in $activeSections.Keys) {
+    foreach ($secKey in $activeSections) {
         $secList = $formattedBuckets[$secKey]
 
         if ($secList.Count -gt 0) {
@@ -295,7 +285,7 @@ function Export-AlignedSectionedCfg {
                 $outputLines.Add("") 
             }
             $outputLines.Add("// ========================================================")
-            $outputLines.Add("// " + $activeSections[$secKey].Title)
+            $outputLines.Add("// " + $secKey.ToUpper())
             $outputLines.Add("// ========================================================")
 
             foreach ($entry in $secList) {
@@ -317,11 +307,8 @@ Export-AlignedSectionedCfg -items $mainCommands -outputPath $outputMainCommands 
 
 foreach ($extKey in $extractedFiles.Keys) {
     $t = $extractedFiles[$extKey]
-    $singleSectionMap = [ordered]@{ "general" = @{ Title = $extKey.ToUpper(); Aliases = @() } }
-    $extraOmits = @($extKey, ($extKey + "s"))
-
-    Export-AlignedSectionedCfg -items $t.Convars  -outputPath $t.ConvarPath  -isCommand $false -label "$($extKey.ToUpper()) ConVars"     -customSectionMap $singleSectionMap -extraOmitFlags $extraOmits
-    Export-AlignedSectionedCfg -items $t.Commands -outputPath $t.CommandPath -isCommand $true  -label "$($extKey.ToUpper()) ConCommands" -customSectionMap $singleSectionMap -extraOmitFlags $extraOmits
+    Export-AlignedSectionedCfg -items $t.Convars  -outputPath $t.ConvarPath  -isCommand $false -label "$($extKey.ToUpper()) ConVars"     -customSection $extKey
+    Export-AlignedSectionedCfg -items $t.Commands -outputPath $t.CommandPath -isCommand $true  -label "$($extKey.ToUpper()) ConCommands" -customSection $extKey
 }
 
 $stopwatch.Stop()
