@@ -16,13 +16,16 @@ $flagsToIgnoreCompletely = [ordered]@{
 }
 
 # 3. Section Priority & Order (Top to Bottom)
+# Unmatched items automatically fall into an internal GENERAL section.
 $sectionConfig = [ordered]@{
     "notify"     = @{ Title = "NOTIFY";                    Aliases = @("notify", "nf") }
     "replicated" = @{ Title = "REPLICATED";                Aliases = @("replicated", "rep") }
     "archive"    = @{ Title = "ARCHIVE (Saved to config)"; Aliases = @("archive", "a") }
     "userinfo"   = @{ Title = "USER INFO";                 Aliases = @("userinfo", "user") }
-    "general"    = @{ Title = "GENERAL";                   Aliases = @() }
 }
+
+# 4. Comment Options
+$omitSectionFlagFromComments = $false
 
 # =========================================================================
 # SCRIPT EXECUTION ENGINE
@@ -38,8 +41,8 @@ $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
 $workingDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Write-Host "========================================================" -ForegroundColor DarkCyan
-Write-Host " Source Engine ConVar/ConCommand Formatter (JSON)" -ForegroundColor Cyan
-Write-Host " Working Directory: $workingDir" -ForegroundColor Gray
+Write-Host " Source Engine Formatter (JSON)" -ForegroundColor Cyan
+Write-Host " Directory: $workingDir" -ForegroundColor Gray
 Write-Host "========================================================" -ForegroundColor DarkCyan
 
 $targetFile = Get-ChildItem -Path $workingDir -File -Filter "*.json" | Select-Object -First 1
@@ -53,7 +56,6 @@ if (-not $targetFile) {
 
 $fileSizeKB = [math]::Round($targetFile.Length / 1KB, 2)
 Write-Host "[+] Found: $($targetFile.Name) ($fileSizeKB KB)" -ForegroundColor Green
-Write-Host "[*] Reading and parsing JSON data..." -ForegroundColor Gray
 
 $data = Get-Content -Raw -Encoding UTF8 $targetFile.FullName | ConvertFrom-Json
 
@@ -132,16 +134,14 @@ foreach ($item in $data) {
     }
 }
 
-Write-Host "[+] Total definitions processed: $($data.Count)" -ForegroundColor Green
-if ($ignoredCount -gt 0) {
-    Write-Host "    - Ignored/Dropped: $ignoredCount items (matched: $($dropFlags -join ', '))" -ForegroundColor Yellow
-}
-Write-Host "    - Main ConVars:     $($mainConvars.Count)" -ForegroundColor Gray
-Write-Host "    - Main ConCommands: $($mainCommands.Count)" -ForegroundColor Gray
-
+Write-Host "[+] Loaded $($data.Count) definitions:" -ForegroundColor Green
+Write-Host "    - Main:      $($mainConvars.Count) convars, $($mainCommands.Count) commands" -ForegroundColor Gray
 foreach ($extKey in $extractedFiles.Keys) {
     $t = $extractedFiles[$extKey]
-    Write-Host "    - Extracted '$extKey' -> ConVars: $($t.Convars.Count) ($($t.ConvarPath)), Commands: $($t.Commands.Count) ($($t.CommandPath))" -ForegroundColor Cyan
+    Write-Host "    - Extracted: $($t.Convars.Count) convars, $($t.Commands.Count) commands -> '$extKey'" -ForegroundColor Cyan
+}
+if ($ignoredCount -gt 0) {
+    Write-Host "    - Dropped:   $ignoredCount items ($($dropFlags -join ', '))" -ForegroundColor Yellow
 }
 
 function Export-AlignedSectionedCfg {
@@ -151,14 +151,18 @@ function Export-AlignedSectionedCfg {
         [bool]$isCommand,
         [string]$label,
         [hashtable]$customSectionMap = $null,
-        [array]$extraOmitFlags = @(),
-        [array]$separationNotes = @()
+        [array]$extraOmitFlags = @()
     )
 
-    Write-Host "`n[*] Processing $label..." -ForegroundColor Cyan
-    Write-Host "    Target File: $outputPath" -ForegroundColor Gray
+    Write-Host "`n[*] Writing $outputPath ($label)..." -ForegroundColor Cyan
 
-    $activeSections = if ($customSectionMap) { $customSectionMap } else { $sectionConfig }
+    $activeSections = [ordered]@{}
+    if ($customSectionMap) {
+        foreach ($k in $customSectionMap.Keys) { $activeSections[$k] = $customSectionMap[$k] }
+    } else {
+        foreach ($k in $sectionConfig.Keys) { $activeSections[$k] = $sectionConfig[$k] }
+        $activeSections["general"] = @{ Title = "GENERAL"; Aliases = @() }
+    }
 
     $buckets = [ordered]@{}
     foreach ($secKey in $activeSections.Keys) {
@@ -184,17 +188,14 @@ function Export-AlignedSectionedCfg {
         }
     }
 
-    Write-Host "    Categorization summary:" -ForegroundColor Gray
-    foreach ($secKey in $activeSections.Keys) {
-        $count = $buckets[$secKey].Count
-        if ($count -gt 0) {
-            $tag = $activeSections[$secKey].Title.Split(' ')[0]
-            Write-Host ("      [{0,-10}] {1,4} items" -f $tag, $count) -ForegroundColor DarkGray
+    if (-not $customSectionMap) {
+        foreach ($secKey in $activeSections.Keys) {
+            $count = $buckets[$secKey].Count
+            if ($count -gt 0) {
+                $tag = $activeSections[$secKey].Title.Split(' ')[0]
+                Write-Host ("    [{0,-10}] {1,4} items" -f $tag, $count) -ForegroundColor DarkGray
+            }
         }
-    }
-
-    foreach ($note in $separationNotes) {
-        Write-Host ("      [{0,-10}] {1,4} items (separated -> {2})" -f $note.Tag, $note.Count, $note.File) -ForegroundColor Yellow
     }
 
     $formattedBuckets = [ordered]@{}
@@ -206,7 +207,7 @@ function Export-AlignedSectionedCfg {
 
         $omitList = @($internalCommonFlagsToOmit)
         if ($extraOmitFlags) { $omitList += $extraOmitFlags }
-        if ($secKey -ne "general" -and $activeSections[$secKey].Aliases) {
+        if ($omitSectionFlagFromComments -and $secKey -ne "general" -and $activeSections[$secKey].Aliases) {
             $omitList += $activeSections[$secKey].Aliases
         }
 
@@ -255,8 +256,6 @@ function Export-AlignedSectionedCfg {
         $formattedBuckets[$secKey] = $formattedList
     }
 
-    Write-Host "    Alignment: '//' aligned at column $($maxBaseLen + 3)" -ForegroundColor Gray
-
     $outputLines = [System.Collections.Generic.List[string]]::new()
 
     foreach ($secKey in $activeSections.Keys) {
@@ -281,25 +280,11 @@ function Export-AlignedSectionedCfg {
     }
 
     $outputLines | Set-Content -Encoding UTF8 $outputPath
-    Write-Host "[+] Saved: $outputPath ($($outputLines.Count) lines)" -ForegroundColor Green
+    Write-Host "[+] Saved $outputPath ($($outputLines.Count) lines)" -ForegroundColor Green
 }
 
-$mainConvarNotes = @()
-$mainCmdNotes    = @()
-
-foreach ($extKey in $extractedFiles.Keys) {
-    $t = $extractedFiles[$extKey]
-    $tag = $extKey.ToUpper()
-    if ($t.Convars.Count -gt 0) {
-        $mainConvarNotes += @{ Tag = $tag; Count = $t.Convars.Count; File = $t.ConvarPath }
-    }
-    if ($t.Commands.Count -gt 0) {
-        $mainCmdNotes += @{ Tag = $tag; Count = $t.Commands.Count; File = $t.CommandPath }
-    }
-}
-
-Export-AlignedSectionedCfg -items $mainConvars  -outputPath $outputMainConvars  -isCommand $false -label "Main ConVars"     -separationNotes $mainConvarNotes
-Export-AlignedSectionedCfg -items $mainCommands -outputPath $outputMainCommands -isCommand $true  -label "Main ConCommands" -separationNotes $mainCmdNotes
+Export-AlignedSectionedCfg -items $mainConvars  -outputPath $outputMainConvars  -isCommand $false -label "Main ConVars"
+Export-AlignedSectionedCfg -items $mainCommands -outputPath $outputMainCommands -isCommand $true  -label "Main ConCommands"
 
 foreach ($extKey in $extractedFiles.Keys) {
     $t = $extractedFiles[$extKey]
@@ -313,7 +298,7 @@ foreach ($extKey in $extractedFiles.Keys) {
 $stopwatch.Stop()
 $elapsedSec = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
 Write-Host "`n========================================================" -ForegroundColor DarkCyan
-Write-Host " Export complete in $elapsedSec seconds!" -ForegroundColor Green
+Write-Host " Completed in $elapsedSec seconds!" -ForegroundColor Green
 Write-Host "========================================================" -ForegroundColor DarkCyan
 Write-Host ""
 Read-Host "Press Enter to exit..."
