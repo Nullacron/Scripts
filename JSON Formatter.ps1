@@ -1,10 +1,3 @@
-<#
-.SYNOPSIS
-    Interactive ConVar & ConCommand Formatter and Exporter for Source Engine & SAR dumps.
-    Features: Flag priority categorization, comment alignment, QoL summary logging,
-    execution benchmarking, and interactive tutorials.
-#>
-
 # --- Baked-in Engine Configuration ---
 $commonOmitFlags = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@('client', 'game'),
@@ -79,6 +72,30 @@ function Format-FileSize {
     if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
     if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
     return "$Bytes B"
+}
+
+# Generates deterministic keys for Order B (All '+' first, then all '-', then '_', then A-Z)
+function Get-SortKey {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return "9_empty" }
+    $lower = $Name.ToLowerInvariant().Trim()
+
+    if ($lower.StartsWith('+')) {
+        return "0_+" + $lower.Substring(1)
+    } elseif ($lower.StartsWith('-')) {
+        return "1_-" + $lower.Substring(1)
+    } elseif ($lower.StartsWith('_')) {
+        return "2__" + $lower.Substring(1)
+    } else {
+        return "3_" + $lower
+    }
+}
+
+function Sort-SourceEntries {
+    param($EntryList)
+    if ($null -eq $EntryList -or $EntryList.Count -le 1) { return $EntryList }
+
+    return @($EntryList | Sort-Object -Property { Get-SortKey -Name $_.Name })
 }
 
 function Test-IsCompatibleJson {
@@ -352,6 +369,7 @@ if ($enableCategorization) {
 } else {
     Write-Host "  - Categorization   : Disabled (Alphabetical list)" -ForegroundColor White
 }
+Write-Host "  - Symbol Sorting   : Order B (All '+' first, then all '-', then A-Z)" -ForegroundColor White
 Write-Host "  - Inline Comments  : $(if ($includeComments) { 'Enabled (Aligned, common engine flags stripped)' } else { 'Omitted' })" -ForegroundColor White
 Write-Host "  - Output Directory : $workDir" -ForegroundColor White
 Write-Host "======================================================================" -ForegroundColor Cyan
@@ -534,7 +552,8 @@ foreach ($pair in $globalBuckets.GetEnumerator()) {
             $rawCatEntries = $categoryMap[$catKey]
             if ($rawCatEntries.Count -eq 0) { continue }
 
-            $catEntries = @($rawCatEntries | Sort-Object -Property Name)
+            # Apply Order B sorting
+            $catEntries = Sort-SourceEntries -EntryList $rawCatEntries
 
             if (-not $firstSection) { $fileLines.Add("") }
             $firstSection = $false
@@ -552,7 +571,8 @@ foreach ($pair in $globalBuckets.GetEnumerator()) {
             }
         }
     } else {
-        $sortedEntries = @($allEntries | Sort-Object -Property Name)
+        # Apply Order B sorting
+        $sortedEntries = Sort-SourceEntries -EntryList $allEntries
 
         foreach ($e in $sortedEntries) {
             if ($includeComments) {
