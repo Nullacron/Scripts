@@ -10,7 +10,7 @@ $commonOmitFlags = [System.Collections.Generic.HashSet[string]]::new(
 function Write-Banner {
     Clear-Host
     Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host "       SOURCE ENGINE VANILLA CVARLIST FORMATTER (CSV)" -ForegroundColor Yellow
+    Write-Host "                  SOURCE CVARLIST FORMATTER" -ForegroundColor Yellow
     Write-Host "======================================================================" -ForegroundColor Cyan
     Write-Host ""
 }
