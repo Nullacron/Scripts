@@ -9,7 +9,7 @@ $commonOmitFlags = [System.Collections.Generic.HashSet[string]]::new(
 function Write-Banner {
     Clear-Host
     Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host "         SOURCE / SAR CONVAR AND CONCOMMAND EXPORT TOOL" -ForegroundColor Yellow
+    Write-Host "                    SAR CVAR DUMP EXPORT TOOL" -ForegroundColor Yellow
     Write-Host "======================================================================" -ForegroundColor Cyan
     Write-Host ""
 }
