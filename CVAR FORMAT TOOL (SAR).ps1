@@ -374,14 +374,6 @@ Write-Host "  - Inline Comments  : $(if ($includeComments) { 'Enabled (Aligned, 
 Write-Host "  - Output Directory : $workDir" -ForegroundColor White
 Write-Host "======================================================================" -ForegroundColor Cyan
 
-$proceed = Prompt-YesNo -Message "Proceed with export using these settings?" -Default $true
-if (-not $proceed) {
-    Write-Host "`n[!] Export cancelled by user." -ForegroundColor Red
-    Write-Host ""
-    $null = Read-Host "Press Enter to exit..."
-    exit 0
-}
-
 # --- Conversion Phase ---
 
 Write-Host "`n[+] Processing dump data..." -ForegroundColor Yellow
