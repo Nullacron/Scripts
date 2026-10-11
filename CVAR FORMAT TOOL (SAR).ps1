@@ -1,622 +1,859 @@
-# --- Baked-in Engine Configuration ---
-$commonOmitFlags = [System.Collections.Generic.HashSet[string]]::new(
-    [string[]]@('client', 'game'),
-    [System.StringComparer]::OrdinalIgnoreCase
+<#
+.SYNOPSIS
+    Optimized SourceAutoRecord (SAR) 'sar_cvars_dump all' JSON to .cfg Converter.
+
+.DESCRIPTION
+    High-performance converter utilizing compiled C# sorting, native C# comment
+    formatting, cached JSON deserialization, dynamic padding, and interactive customization.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [string]$Directory = $PSScriptRoot
 )
 
-# --- UI Helpers ---
-
-function Write-Banner {
-    Clear-Host
-    Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host "                      SAR CVAR DUMP FORMATTER" -ForegroundColor Yellow
-    Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host ""
+if ([string]::IsNullOrWhiteSpace($Directory)) {
+    $Directory = (Get-Location).Path
 }
 
-function Write-Step {
-    param([string]$StepNum, [string]$Title)
-    Write-Host "`n[$StepNum] $Title" -ForegroundColor Yellow
-}
+# Compile high-performance C# item container, native comment generator, & comparer
+if (-not ('SourceEngineCvarComparer' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
 
-function Prompt-Choice {
-    param(
-        [string[]]$Options,
-        [int]$DefaultIndex = 1
-    )
-    for ($i = 0; $i -lt $Options.Count; $i++) {
-        $num = $i + 1
-        $marker = if ($num -eq $DefaultIndex) { "*" } else { " " }
-        Write-Host "  [$num]$marker $($Options[$i])" -ForegroundColor Gray
+public class CvarItem
+{
+    public string Name;
+    public string LeftSide;
+    public bool IsCmd;
+    public bool IsSAR;
+    public List<string> ActiveFlags;
+    public string HelpText;
+
+    public CvarItem(string name, string leftSide, bool isCmd, bool isSAR, List<string> activeFlags, string helpText)
+    {
+        Name = name;
+        LeftSide = leftSide;
+        IsCmd = isCmd;
+        IsSAR = isSAR;
+        ActiveFlags = activeFlags;
+        HelpText = helpText;
     }
-    while ($true) {
-        $raw = Read-Host "  Choose option [1-$($Options.Count)] (Default: $DefaultIndex)"
-        if ([string]::IsNullOrWhiteSpace($raw)) { return $DefaultIndex }
-        $val = 0
-        if ([int]::TryParse($raw, [ref]$val) -and $val -ge 1 -and $val -le $Options.Count) {
-            return $val
+
+    public string GetComment(string sectionName, bool omitSectionFlag)
+    {
+        List<string> display = null;
+        if (ActiveFlags != null && ActiveFlags.Count > 0)
+        {
+            int count = ActiveFlags.Count;
+            for (int i = 0; i < count; i++)
+            {
+                string f = ActiveFlags[i];
+                if (omitSectionFlag && !string.IsNullOrEmpty(sectionName) && 
+                    !sectionName.Equals("OTHER", StringComparison.OrdinalIgnoreCase) && 
+                    f.Equals(sectionName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (display == null) display = new List<string>(count);
+                display.Add(f);
+            }
         }
-        Write-Host "  [!] Invalid choice. Please enter 1-$($Options.Count)." -ForegroundColor Red
+
+        bool hasFlags = display != null && display.Count > 0;
+        bool hasHelp = !string.IsNullOrEmpty(HelpText);
+
+        if (hasFlags && hasHelp)
+            return "(" + string.Join(", ", display) + ") " + HelpText;
+        if (hasFlags)
+            return "(" + string.Join(", ", display) + ")";
+        if (hasHelp)
+            return HelpText;
+        return "";
     }
 }
 
-function Prompt-YesNo {
-    param(
-        [string]$Message,
-        [bool]$Default = $true
-    )
-    $defStr = if ($Default) { "Y/n" } else { "y/N" }
-    while ($true) {
-        $ans = Read-Host "  $Message [$defStr]"
-        if ([string]::IsNullOrWhiteSpace($ans)) { return $Default }
-        if ($ans -match '^(y|yes)$') { return $true }
-        if ($ans -match '^(n|no)$')  { return $false }
-        Write-Host "  [!] Please enter 'y' or 'n'." -ForegroundColor Red
+public class SourceEngineCvarComparer : IComparer<string>, IComparer<CvarItem>
+{
+    public static readonly SourceEngineCvarComparer Instance = new SourceEngineCvarComparer();
+
+    private static int GetCharRank(char c)
+    {
+        char lower = char.ToLowerInvariant(c);
+        if (lower == '+') return 1;
+        if (lower == '-') return 2;
+        if (lower == '_') return 3;
+        if (lower >= '0' && lower <= '9') return 10 + (lower - '0');
+        if (lower >= 'a' && lower <= 'z') return 30 + (lower - 'a');
+        return 100 + (int)lower;
+    }
+
+    public int Compare(string x, string y)
+    {
+        if (ReferenceEquals(x, y)) return 0;
+        if (x == null) return -1;
+        if (y == null) return 1;
+
+        int len = Math.Min(x.Length, y.Length);
+        for (int i = 0; i < len; i++)
+        {
+            char cx = char.ToLowerInvariant(x[i]);
+            char cy = char.ToLowerInvariant(y[i]);
+            if (cx != cy)
+            {
+                int rx = GetCharRank(cx);
+                int ry = GetCharRank(cy);
+                return rx.CompareTo(ry);
+            }
+        }
+        return x.Length.CompareTo(y.Length);
+    }
+
+    public int Compare(CvarItem a, CvarItem b)
+    {
+        if (ReferenceEquals(a, b)) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+        return Compare(a.Name, b.Name);
+    }
+
+    public static void Sort(List<CvarItem> items)
+    {
+        if (items != null) items.Sort(Instance);
     }
 }
-
-function Show-FlagsGrid {
-    param([string[]]$FlagsList)
-    $colWidth = 24
-    $cols = 3
-    for ($i = 0; $i -lt $FlagsList.Count; $i++) {
-        $itemStr = "[$($i + 1)] $($FlagsList[$i])".PadRight($colWidth)
-        Write-Host -NoNewline "  $itemStr" -ForegroundColor Cyan
-        if (($i + 1) % $cols -eq 0 -or ($i + 1) -eq $FlagsList.Count) { Write-Host "" }
-    }
-    Write-Host ""
+'@
 }
 
-function Format-FileSize {
-    param([long]$Bytes)
-    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
-    return "$Bytes B"
+# O(1) HashSet for ignored DLL/empty placeholder flags
+$ignoredFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+[void]$ignoredFlags.Add('game')
+[void]$ignoredFlags.Add('client')
+[void]$ignoredFlags.Add('none')
+
+# 1. Discover JSON files
+$jsonFiles = Get-ChildItem -LiteralPath $Directory -Filter *.json -File
+
+if ($jsonFiles.Count -eq 0) {
+    Write-Warning "No .json files found in: $Directory"
+    Read-Host "`nPress Enter to exit"
+    return
 }
 
-# Generates deterministic keys for Order B (All '+' first, then all '-', then '_', then A-Z)
-function Get-SortKey {
-    param([string]$Name)
-    if ([string]::IsNullOrWhiteSpace($Name)) { return "9_empty" }
-    $lower = $Name.ToLowerInvariant().Trim()
+$hasMultipleFiles = ($jsonFiles.Count -gt 1)
 
-    if ($lower.StartsWith('+')) {
-        return "0_+" + $lower.Substring(1)
-    } elseif ($lower.StartsWith('-')) {
-        return "1_-" + $lower.Substring(1)
-    } elseif ($lower.StartsWith('_')) {
-        return "2__" + $lower.Substring(1)
-    } else {
-        return "3_" + $lower
-    }
-}
+# 2. Single-pass flag pre-scan + in-memory JSON caching (eliminates reading/parsing twice)
+$discoveredFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$jsonCache = @{}
 
-function Sort-SourceEntries {
-    param($EntryList)
-    if ($null -eq $EntryList -or $EntryList.Count -le 1) { return $EntryList }
-
-    return @($EntryList | Sort-Object -Property { Get-SortKey -Name $_.Name })
-}
-
-function Test-IsCompatibleJson {
-    param([string]$FilePath)
+foreach ($file in $jsonFiles) {
     try {
-        $raw = [System.IO.File]::ReadAllText($FilePath)
-        $data = $raw | ConvertFrom-Json
-        if ($data -is [System.Array] -and $data.Count -gt 0) {
-            $first = $data[0]
-            return ($null -ne $first.name -and $null -ne $first.isCommand -and $null -ne $first.flagsStr)
+        $rawContent = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        $items = $rawContent | ConvertFrom-Json
+        $jsonCache[$file.FullName] = $items
+
+        foreach ($item in $items) {
+            if ($item.flagsStr) {
+                $tokens = $item.flagsStr.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+                foreach ($t in $tokens) {
+                    $clean = $t.Trim()
+                    if ($clean -and -not $ignoredFlags.Contains($clean)) {
+                        [void]$discoveredFlags.Add($clean.ToUpperInvariant())
+                    }
+                }
+            }
         }
     } catch {
-        return $false
+        Write-Warning "Failed to parse '$($file.Name)' during flag discovery: $_"
     }
-    return $false
 }
 
-function Format-EntryComment {
+$availableFlagsList = $discoveredFlags | Sort-Object
+
+# =========================================================================
+# INTERACTIVE TERMINAL CONFIGURATION
+# =========================================================================
+
+Clear-Host
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host "                SAR JSON CvarDump to CFG Converter                      " -ForegroundColor Cyan
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host "Found $($jsonFiles.Count) JSON file(s) in: $Directory`n"
+
+# --- PROMPT 1: Output File Naming ---
+Write-Host "[1] Output File Naming" -ForegroundColor Yellow
+Write-Host "  1) Input File Name - Uses the JSON's base name (e.g., <input>_cvars.cfg)"
+if ($hasMultipleFiles) {
+    Write-Host "  2) Descriptor      - [DISABLED] Multiple JSON files detected; would cause overwrites" -ForegroundColor DarkGray
+    Write-Host "  3) Custom Name     - Choose a custom name for each file"
+} else {
+    Write-Host "  2) Descriptor      - Uses only the category name (e.g., cvars.cfg, full.cfg)"
+    Write-Host "  3) Custom Name     - Choose a custom name"
+}
+
+do {
+    $namingChoice = Read-Host "`nSelect naming option (Default: 1)"
+    if ([string]::IsNullOrWhiteSpace($namingChoice)) { $namingChoice = '1' }
+
+    if ($hasMultipleFiles -and $namingChoice -eq '2') {
+        Write-Warning "Option [2] is disabled when multiple JSON files are present to prevent overwrites."
+        $namingChoice = $null
+    }
+} while ($namingChoice -notin @('1', '2', '3') -or [string]::IsNullOrWhiteSpace($namingChoice))
+
+$customFileNames = @{}
+if ($namingChoice -eq '3') {
+    Write-Host "`n  Assign Custom Name(s):" -ForegroundColor DarkCyan
+    foreach ($f in $jsonFiles) {
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+        $promptLabel = if ($hasMultipleFiles) { "  Enter name for '$($f.Name)' (Default: '$base')" } else { "  Enter name (Default: '$base')" }
+        $chosenCustom = (Read-Host $promptLabel).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($chosenCustom)) {
+            $chosenCustom = $base
+        } else {
+            $chosenCustom = $chosenCustom -replace '\.cfg$', ''
+        }
+
+        $customFileNames[$f.FullName] = $chosenCustom
+    }
+}
+
+# --- PROMPT 2: Command Types ---
+Write-Host "`n[2] Command Types" -ForegroundColor Yellow
+Write-Host "  1) Both Combined     - Export everything into a single file"
+Write-Host "  2) ConVariables Only - Export settings only; omit actions"
+Write-Host "  3) ConCommands Only  - Export actions only; omit settings"
+Write-Host "  4) Separate Files    - Export both into distinct files"
+$typeChoice = Read-Host "`nSelect type option [1-4] (Default: 1)"
+if ($typeChoice -notin @('1', '2', '3', '4')) { $typeChoice = '1' }
+
+# --- PROMPT 3: SAR Plugin Scope ---
+Write-Host "`n[3] SAR Plugin Scope" -ForegroundColor Yellow
+Write-Host "  1) Keep All (Default)     - Include both standard Game and SAR commands"
+Write-Host "  2) Game Only              - Exclude SAR plugin commands"
+Write-Host "  3) SAR Only               - Exclude standard Game commands"
+Write-Host "  4) Separate Files         - Export Game and SAR commands into distinct files"
+$sarChoice = Read-Host "`nSelect SAR option [1-4] (Default: 1)"
+if ($sarChoice -notin @('1', '2', '3', '4')) { $sarChoice = '1' }
+
+$tagSarFlag = $false
+if ($sarChoice -in @('1', '4')) {
+    $tagPrompt = Read-Host "`nTag SAR commands with 'SAR' flag in comments/sections? (y/n) [Default: y]"
+    $tagSarFlag = ($tagPrompt.Trim().ToLower() -notin @('n', 'no'))
+    if ($tagSarFlag) {
+        [void]$discoveredFlags.Add('SAR')
+        $availableFlagsList = $discoveredFlags | Sort-Object
+    }
+}
+
+# --- PROMPT 4: Flag Handling ---
+Write-Host "`n[4] Flag Handling" -ForegroundColor Yellow
+Write-Host "  [4A] Flag Action" -ForegroundColor Yellow
+Write-Host "    1) Keep All (Default)"
+Write-Host "    2) Omit Flags"
+Write-Host "    3) Separate Flags"
+$flagAction = Read-Host "`nSelect action [1-3] (Default: 1)"
+if ($flagAction -notin @('1', '2', '3')) { $flagAction = '1' }
+
+$omitFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$separateFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$removeSeparatedFromMain = $true
+
+if ($flagAction -in @('2', '3')) {
+    Write-Host "`nAvailable Flags:" -ForegroundColor DarkCyan
+    if ($availableFlagsList.Count -gt 0) {
+        for ($i = 0; $i -lt $availableFlagsList.Count; $i++) {
+            $numTag = ("[{0}]" -f ($i + 1)).PadRight(5)
+            Write-Host ("  {0} {1}" -f $numTag, $availableFlagsList[$i]) -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  (None detected)" -ForegroundColor Gray
+    }
+
+    $actionVerb = if ($flagAction -eq '2') { "OMIT" } else { "SEPARATE" }
+    Write-Host "`n  [4B] Choose Flags" -ForegroundColor Yellow
+    $selectedFlagsInput = Read-Host "Select flag(s) to $actionVerb (numbers or names)"
+
+    if (-not [string]::IsNullOrWhiteSpace($selectedFlagsInput)) {
+        $tokens = $selectedFlagsInput.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+        $resolvedFlags = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($token in $tokens) {
+            if ($token -match '^\d+$') {
+                $idx = [int]$token - 1
+                if ($idx -ge 0 -and $idx -lt $availableFlagsList.Count) {
+                    $resolvedFlags.Add($availableFlagsList[$idx].ToUpperInvariant())
+                }
+            } else {
+                $matched = $availableFlagsList | Where-Object { $_ -ieq $token } | Select-Object -First 1
+                if ($matched) {
+                    $resolvedFlags.Add($matched.ToUpperInvariant())
+                }
+            }
+        }
+
+        if ($flagAction -eq '2') {
+            foreach ($f in $resolvedFlags) { [void]$omitFlags.Add($f) }
+            Write-Host "  -> Omit: $($omitFlags -join ', ')" -ForegroundColor DarkGray
+        } elseif ($flagAction -eq '3') {
+            foreach ($f in $resolvedFlags) { [void]$separateFlags.Add($f) }
+            Write-Host "  -> Separate: $($separateFlags -join ', ')" -ForegroundColor DarkGray
+
+            $removeChoice = Read-Host "`nRemove separated flags from main file? (y/n) [Default: y]"
+            if ($removeChoice.Trim().ToLower() -eq 'n') {
+                $removeSeparatedFromMain = $false
+            }
+        }
+    }
+}
+
+# --- PROMPT 5: Flag Sectioning (y/n) ---
+Write-Host "`n[5] Flag Sectioning" -ForegroundColor Yellow
+$secChoice = Read-Host "Categorize commands by flag? (y/n) [Default: n]"
+$enableSectioning = ($secChoice.Trim().ToLower() -in @('y', 'yes'))
+
+$sectionFlagOrder = [System.Collections.Generic.List[string]]::new()
+$omitSectionFlagFromComment = $true
+
+if ($enableSectioning) {
+    Write-Host "`nAvailable Flags:" -ForegroundColor DarkCyan
+    if ($availableFlagsList.Count -gt 0) {
+        for ($i = 0; $i -lt $availableFlagsList.Count; $i++) {
+            $numTag = ("[{0}]" -f ($i + 1)).PadRight(5)
+            Write-Host ("  {0} {1}" -f $numTag, $availableFlagsList[$i]) -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  (None detected)" -ForegroundColor Gray
+    }
+
+    $secInput = Read-Host "`nSelect section order (numbers or names, e.g. '1, 4' or 'REPLICATED, ARCHIVE')"
+    if (-not [string]::IsNullOrWhiteSpace($secInput)) {
+        $tokens = $secInput.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+        foreach ($token in $tokens) {
+            $matchedFlag = $null
+            if ($token -match '^\d+$') {
+                $idx = [int]$token - 1
+                if ($idx -ge 0 -and $idx -lt $availableFlagsList.Count) {
+                    $matchedFlag = $availableFlagsList[$idx].ToUpperInvariant()
+                }
+            } else {
+                $matched = $availableFlagsList | Where-Object { $_ -ieq $token } | Select-Object -First 1
+                if ($matched) {
+                    $matchedFlag = $matched.ToUpperInvariant()
+                }
+            }
+
+            if ($matchedFlag -and -not $sectionFlagOrder.Contains($matchedFlag)) {
+                $sectionFlagOrder.Add($matchedFlag)
+            }
+        }
+        if ($sectionFlagOrder.Count -gt 0) {
+            Write-Host "  -> Priority: $($sectionFlagOrder -join ' -> ') -> OTHER" -ForegroundColor DarkGray
+
+            $omitSecPrompt = Read-Host "`nOmit section's flag from comments inside that section? (y/n) [Default: y]"
+            if ($omitSecPrompt.Trim().ToLower() -eq 'n') {
+                $omitSectionFlagFromComment = $false
+            }
+        }
+    }
+}
+
+Write-Host "`n========================================================================" -ForegroundColor Cyan
+Write-Host "                     Starting Batch Conversion                          " -ForegroundColor Cyan
+Write-Host "========================================================================`n" -ForegroundColor Cyan
+
+# =========================================================================
+# HELPER FUNCTIONS
+# =========================================================================
+
+function Get-OutputFileName {
     param(
-        $Entry,
-        [string]$CategoryFlag,
-        [bool]$OmitCategoryFlag,
-        [System.Collections.Generic.HashSet[string]]$CommonOmitFlags
+        [string]$NamingOption,
+        [string]$InputBaseName,
+        [string]$CustomName,
+        [string]$Descriptor,
+        [string]$FlagName = ""
     )
 
-    $cParts = [System.Collections.Generic.List[string]]::new()
+    $parts = [System.Collections.Generic.List[string]]::new()
 
-    $displayFlags = [System.Collections.Generic.List[string]]::new()
-    foreach ($fl in $Entry.Flags) {
-        if ($CommonOmitFlags.Contains($fl)) { continue }
-        if ($OmitCategoryFlag -and -not [string]::IsNullOrWhiteSpace($CategoryFlag) -and $fl -eq $CategoryFlag) {
+    switch ($NamingOption) {
+        '1' {
+            $parts.Add($InputBaseName)
+            $parts.Add($Descriptor)
+        }
+        '2' {
+            $parts.Add($Descriptor)
+        }
+        '3' {
+            $parts.Add($CustomName)
+            $parts.Add($Descriptor)
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($FlagName)) {
+        $parts.Add($FlagName.ToLowerInvariant())
+    }
+
+    return ($parts -join '_') + ".cfg"
+}
+
+function Write-CfgFile {
+    param(
+        [string]$FilePath,
+        [System.Collections.Generic.List[CvarItem]]$Entries,
+        [System.Collections.Generic.List[string]]$SectionFlags,
+        [bool]$OmitSectionFlag = $false,
+        [int]$FileNamePadding = 0
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    if ($null -eq $Entries -or $Entries.Count -eq 0) { 
+        return @{ Count = 0; Categories = @{} }
+    }
+
+    $maxLen = 0
+    foreach ($e in $Entries) {
+        if ($e.LeftSide.Length -gt $maxLen) {
+            $maxLen = $e.LeftSide.Length
+        }
+    }
+
+    $outputLines = [System.Collections.Generic.List[string]]::new($Entries.Count + 16)
+    $categoryDistribution = [ordered]@{}
+    $isSectioned = $false
+
+    # Sectioned output mode
+    if ($SectionFlags -and $SectionFlags.Count -gt 0) {
+        $buckets = [ordered]@{}
+        foreach ($sf in $SectionFlags) {
+            $buckets[$sf] = [System.Collections.Generic.List[CvarItem]]::new()
+        }
+        $buckets['OTHER'] = [System.Collections.Generic.List[CvarItem]]::new()
+
+        # Ordering bias: First matching flag claims the command
+        foreach ($entry in $Entries) {
+            $claimed = $false
+            foreach ($sf in $SectionFlags) {
+                if ($entry.ActiveFlags.Contains($sf)) {
+                    [void]$buckets[$sf].Add($entry)
+                    $claimed = $true
+                    break
+                }
+            }
+            if (-not $claimed) {
+                [void]$buckets['OTHER'].Add($entry)
+            }
+        }
+
+        $namedSectionsPopulated = 0
+        foreach ($sf in $SectionFlags) {
+            if ($buckets[$sf].Count -gt 0) {
+                $namedSectionsPopulated++
+            }
+        }
+
+        if ($namedSectionsPopulated -gt 0) {
+            $isSectioned = $true
+            foreach ($sectionName in $buckets.Keys) {
+                $bList = $buckets[$sectionName]
+                if ($bList.Count -eq 0) { continue }
+
+                $categoryDistribution[$sectionName] = $bList.Count
+
+                if ($outputLines.Count -gt 0) {
+                    $outputLines.Add("")
+                }
+
+                $outputLines.Add("// ====================")
+                $outputLines.Add("// $sectionName")
+                $outputLines.Add("// ====================")
+                $outputLines.Add("")
+
+                # Compiled native sort (<1ms)
+                [SourceEngineCvarComparer]::Sort($bList)
+
+                foreach ($e in $bList) {
+                    # Fast compiled C# comment method call
+                    $commentBody = $e.GetComment($sectionName, $OmitSectionFlag)
+                    if (-not [string]::IsNullOrEmpty($commentBody)) {
+                        $padded = $e.LeftSide.PadRight($maxLen)
+                        $outputLines.Add("$padded // $commentBody")
+                    } else {
+                        $outputLines.Add($e.LeftSide)
+                    }
+                }
+            }
+        }
+    }
+
+    # Flat list mode (either sectioning disabled or no named flags matched)
+    if (-not $isSectioned) {
+        [SourceEngineCvarComparer]::Sort($Entries)
+
+        foreach ($e in $Entries) {
+            $commentBody = $e.GetComment("", $false)
+            if (-not [string]::IsNullOrEmpty($commentBody)) {
+                $padded = $e.LeftSide.PadRight($maxLen)
+                $outputLines.Add("$padded // $commentBody")
+            } else {
+                $outputLines.Add($e.LeftSide)
+            }
+        }
+    }
+
+    # Save as UTF-8 without BOM
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllLines($FilePath, $outputLines, $utf8NoBom)
+    $sw.Stop()
+
+    $fileInfo = Get-Item -LiteralPath $FilePath
+    $sizeKb = [math]::Round($fileInfo.Length / 1KB, 1)
+    $timeMs = $sw.ElapsedMilliseconds
+
+    $actualFileName = [System.IO.Path]::GetFileName($FilePath)
+    $paddedFileName = if ($FileNamePadding -gt 0) { $actualFileName.PadRight($FileNamePadding) } else { $actualFileName }
+
+    Write-Host ("  [Wrote] {0}  ({1} entries, {2} KB) in {3}ms" -f `
+        $paddedFileName, `
+        $Entries.Count, `
+        "$sizeKb", `
+        $timeMs) -ForegroundColor Green
+
+    if ($categoryDistribution.Count -gt 0) {
+        $catParts = foreach ($k in $categoryDistribution.Keys) { "{0}: {1}" -f $k, $categoryDistribution[$k] }
+        Write-Host ("          Categories: {0}" -f ($catParts -join ' | ')) -ForegroundColor DarkGray
+    } elseif ($SectionFlags -and $SectionFlags.Count -gt 0) {
+        Write-Host ("          Categories: Uncategorized (no matching flags)") -ForegroundColor DarkGray
+    }
+
+    return @{ Count = $Entries.Count; Categories = $categoryDistribution }
+}
+
+# =========================================================================
+# CONVERSION PROCESS & TELEMETRY
+# =========================================================================
+
+$totalStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$totalFilesWritten = 0
+$totalEntriesWritten = 0
+$totalRawEncountered = 0
+$totalOmittedByFlag = 0
+$totalOmittedByType = 0
+$totalOmittedBySar = 0
+$totalSeparatedCount = 0
+$globalCategoryTotals = [ordered]@{}
+
+$fileIndex = 0
+
+foreach ($file in $jsonFiles) {
+    $fileIndex++
+    $fileSw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Host ("------------------------------------------------------------------------") -ForegroundColor DarkGray
+    Write-Host ("File [{0}/{1}]: {2}" -f $fileIndex, $jsonFiles.Count, $file.Name) -ForegroundColor Yellow
+    Write-Host ("------------------------------------------------------------------------") -ForegroundColor DarkGray
+
+    # Instant retrieval from cache (avoids reading file and deserializing JSON twice)
+    $records = $jsonCache[$file.FullName]
+    if ($null -eq $records) {
+        Write-Warning "  [!] No valid records found for '$($file.Name)'. Skipping."
+        continue
+    }
+
+    $parsedEntries = [System.Collections.Generic.List[CvarItem]]::new($records.Count)
+    $rawCvarCount = 0
+    $rawCcomCount = 0
+    $rawGameCount = 0
+    $rawSarCount  = 0
+    $fileOmittedByFlag = 0
+    $fileOmittedBySar  = 0
+    $omittedFlagCounts = @{}
+
+    foreach ($row in $records) {
+        if ([string]::IsNullOrWhiteSpace($row.name)) { continue }
+
+        $name = $row.name.Trim()
+        if ($name.StartsWith("'") -and $name.EndsWith("'") -and $name.Length -ge 2) {
+            $name = $name.Substring(1, $name.Length - 2)
+        }
+
+        $isCmd = [bool]$row.isCommand
+        $isSar = [bool]$row.isSAR
+        $val = if (-not $isCmd -and $null -ne $row.default) { $row.default.ToString().Trim() } else { "" }
+
+        if ($isCmd) { $rawCcomCount++ } else { $rawCvarCount++ }
+        if ($isSar) { $rawSarCount++  } else { $rawGameCount++ }
+
+        # Filter by SAR scope (Game Only or SAR Only)
+        if ($sarChoice -eq '2' -and $isSar) {
+            $fileOmittedBySar++
             continue
         }
-        $displayFlags.Add($fl)
-    }
+        if ($sarChoice -eq '3' -and -not $isSar) {
+            $fileOmittedBySar++
+            continue
+        }
 
-    if ($displayFlags.Count -gt 0) {
-        $cParts.Add("(" + ($displayFlags -join ", ") + ")")
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($Entry.MinMax)) {
-        $cParts.Add($Entry.MinMax)
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($Entry.Help)) {
-        $cParts.Add($Entry.Help)
-    }
-
-    if ($cParts.Count -gt 0) {
-        return ($cParts -join " ")
-    }
-    return ""
-}
-
-# --- Initialization ---
-
-Write-Banner
-
-$workDir = $PSScriptRoot
-if ([string]::IsNullOrWhiteSpace($workDir)) { $workDir = (Get-Location).Path }
-
-Write-Host "[i] Scanning directory: $workDir" -ForegroundColor DarkGray
-
-$allJsonFiles = Get-ChildItem -Path $workDir -Filter "*.json" -File
-$compatibleFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-
-foreach ($file in $allJsonFiles) {
-    if (Test-IsCompatibleJson -FilePath $file.FullName) {
-        $compatibleFiles.Add($file)
-    }
-}
-
-# --- Tutorial Fallback (If No Files Found) ---
-if ($compatibleFiles.Count -eq 0) {
-    Write-Host "`n[!] No compatible convar JSON dumps found in this directory." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host "            HOW TO GET 'cvars_all.json' USING SAR" -ForegroundColor Yellow
-    Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host "  1. Launch Portal 2 with SourceAutoRecord (SAR) installed." -ForegroundColor White
-    Write-Host "     (Verify SAR is loaded by checking console or typing: sar_about)" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  2. Open the developer console (~) and run:" -ForegroundColor White
-    Write-Host "         sar_cvars_dump all" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  3. SAR will dump all cvars and commands into:" -ForegroundColor White
-    Write-Host "         cvars_all.json" -ForegroundColor Green
-    Write-Host "     Location: The base 'Portal 2' folder (NOT the 'portal2' subfolder)" -ForegroundColor Yellow
-    Write-Host "     Example:  .../steamapps/common/Portal 2/cvars_all.json" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "  4. Copy 'cvars_all.json' into the folder where this script is located:" -ForegroundColor White
-    Write-Host "         $workDir" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  5. Re-run this script!" -ForegroundColor White
-    Write-Host "======================================================================" -ForegroundColor Cyan
-    Write-Host ""
-    $null = Read-Host "Press Enter to exit..."
-    exit 0
-}
-
-Write-Host "[+] Found $($compatibleFiles.Count) compatible dump file(s):" -ForegroundColor Green
-foreach ($f in $compatibleFiles) {
-    Write-Host "    - $($f.Name)" -ForegroundColor White
-}
-
-# Discover distinct flags
-$discoveredFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($file in $compatibleFiles) {
-    $content = [System.IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
-    foreach ($entry in $content) {
-        if ($entry.flagsStr -and $entry.flagsStr -ne 'none') {
-            foreach ($fl in ($entry.flagsStr -split '\s+')) {
-                if (-not [string]::IsNullOrWhiteSpace($fl) -and $fl -ne 'none') {
-                    [void]$discoveredFlags.Add($fl)
+        # Parse SAR flags into discrete uppercase tokens with O(1) ignored flag filtering
+        $activeFlags = [System.Collections.Generic.List[string]]::new()
+        if ($row.flagsStr) {
+            $tokens = $row.flagsStr.Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+            foreach ($t in $tokens) {
+                $clean = $t.Trim()
+                if ($clean -and -not $ignoredFlags.Contains($clean)) {
+                    $activeFlags.Add($clean.ToUpperInvariant())
                 }
             }
         }
-    }
-}
-$sortedFlags = @($discoveredFlags | Sort-Object)
 
-# --- Interactive Prompts ---
+        if ($tagSarFlag -and $isSar) {
+            $activeFlags.Add('SAR')
+        }
 
-# 1. Output File Naming Scheme
-Write-Step "1/6" "Output File Naming Scheme"
-$namingOption = Prompt-Choice -Options @(
-    "Use source file name as base (e.g., cvars_all_cheat_cvars.cfg)",
-    "Descriptors only / No base name (e.g., ccoms.cfg, cheat_cvars.cfg)",
-    "Specify a custom base name (e.g., mygame_cheat_cvars.cfg)"
-) -DefaultIndex 1
-
-$customBaseName = ""
-if ($namingOption -eq 3) {
-    while ([string]::IsNullOrWhiteSpace($customBaseName)) {
-        $customBaseName = (Read-Host "  Enter custom base name").Trim()
-    }
-}
-
-# 2. ConCommands Handling
-Write-Step "2/6" "ConCommands ('isCommand') Handling"
-$ccomOption = Prompt-Choice -Options @(
-    "Keep ConCommands and ConVars together",
-    "Separate into different files ('_ccoms' and '_cvars')",
-    "Completely exclude ConCommands (ConVars only)"
-) -DefaultIndex 1
-
-# 3. SAR Entries Handling
-Write-Step "3/6" "SAR Entries ('isSAR') Handling"
-$sarOption = Prompt-Choice -Options @(
-    "Keep SAR and Engine/Game commands together",
-    "Separate SAR entries into dedicated files ('_sar')",
-    "Completely exclude SAR entries (Engine/Game only)",
-    "Completely exclude Engine/Game entries (SAR only)"
-) -DefaultIndex 1
-
-# 4. Flag Routing / File Filtering
-Write-Step "4/6" "Flag Routing / File Filtering"
-$flagActionOption = Prompt-Choice -Options @(
-    "Do not filter or route flags to separate files",
-    "Exclude entries containing specified flags entirely",
-    "Route entries containing specified flags into their own file(s)"
-) -DefaultIndex 1
-
-$selectedFlags = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-if ($flagActionOption -ne 1) {
-    Write-Host "`n  Available Flags in Dataset ($($sortedFlags.Count)):" -ForegroundColor Yellow
-    Show-FlagsGrid -FlagsList $sortedFlags
-
-    while ($true) {
-        $inputFlags = Read-Host "  Enter flag numbers or names to select (comma-separated, e.g. 1, 4, cheat)"
-        if (-not [string]::IsNullOrWhiteSpace($inputFlags)) {
-            $tokens = $inputFlags -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            foreach ($tok in $tokens) {
-                $idx = 0
-                if ([int]::TryParse($tok, [ref]$idx) -and $idx -ge 1 -and $idx -le $sortedFlags.Count) {
-                    [void]$selectedFlags.Add($sortedFlags[$idx - 1])
-                } elseif ($discoveredFlags.Contains($tok)) {
-                    [void]$selectedFlags.Add($tok)
-                } else {
-                    Write-Host "  [!] Warning: Flag '$tok' not found, skipping." -ForegroundColor Yellow
-                }
-            }
-            if ($selectedFlags.Count -gt 0) {
-                Write-Host "  [OK] Active flag filter: $($selectedFlags -join ', ')" -ForegroundColor Green
+        # Check flag omissions
+        $omittedByThisFlag = $null
+        foreach ($f in $activeFlags) {
+            if ($omitFlags.Contains($f)) {
+                $omittedByThisFlag = $f
                 break
             }
         }
-        Write-Host "  [!] Please select at least one flag." -ForegroundColor Red
-    }
-}
 
-# 5. Flag Categorization & Priority Bias
-Write-Step "5/6" "Section Categorization and Priority Bias"
-$enableCategorization = Prompt-YesNo -Message "Categorize output files into banner sections by flag priority?" -Default $true
-$priorityFlags        = [System.Collections.Generic.List[string]]::new()
-$omitCategoryFlag     = $false
-
-if ($enableCategorization) {
-    Write-Host "`n  Available Flags for Categorization:" -ForegroundColor Yellow
-    Show-FlagsGrid -FlagsList $sortedFlags
-
-    while ($true) {
-        Write-Host "  Enter flags in PRIORITY order (left-to-right, e.g. replicated, archive, cheat):" -ForegroundColor Cyan
-        $inputPrio = Read-Host "  Priority Flags"
-        if (-not [string]::IsNullOrWhiteSpace($inputPrio)) {
-            $pTokens = $inputPrio -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            foreach ($tok in $pTokens) {
-                $idx = 0
-                if ([int]::TryParse($tok, [ref]$idx) -and $idx -ge 1 -and $idx -le $sortedFlags.Count) {
-                    $matchedFlag = $sortedFlags[$idx - 1].ToLowerInvariant()
-                    if (-not $priorityFlags.Contains($matchedFlag)) { $priorityFlags.Add($matchedFlag) }
-                } elseif ($discoveredFlags.Contains($tok)) {
-                    $matchedFlag = $tok.ToLowerInvariant()
-                    if (-not $priorityFlags.Contains($matchedFlag)) { $priorityFlags.Add($matchedFlag) }
-                } else {
-                    Write-Host "  [!] Warning: Flag '$tok' not found, skipping." -ForegroundColor Yellow
-                }
+        if ($null -ne $omittedByThisFlag) {
+            $fileOmittedByFlag++
+            if (-not $omittedFlagCounts.ContainsKey($omittedByThisFlag)) {
+                $omittedFlagCounts[$omittedByThisFlag] = 0
             }
-            if ($priorityFlags.Count -gt 0) {
-                break
-            }
-        }
-        Write-Host "  [!] Please specify at least one valid priority flag." -ForegroundColor Red
-    }
-
-    $omitCategoryFlag = Prompt-YesNo -Message "Omit the section's flag from each command's comment? (e.g. REPLICATED section won't show 'replicated')" -Default $true
-}
-
-# 6. Inline Comments Option
-Write-Step "6/6" "Inline Comments Formatting"
-$includeComments = Prompt-YesNo -Message "Include inline comments ('// (flags) [min/max] helpStr')?" -Default $true
-
-# --- Finalized Options Summary ---
-
-Write-Host "`n======================================================================" -ForegroundColor Cyan
-Write-Host "                      FINALIZED CONFIGURATION" -ForegroundColor Yellow
-Write-Host "======================================================================" -ForegroundColor Cyan
-
-$namingDesc = switch ($namingOption) {
-    1 { "Source File Base Name (<source>_...)" }
-    2 { "Descriptor-Only (e.g., cheat_cvars.cfg)" }
-    3 { "Custom Base Name ('$customBaseName')" }
-}
-$ccomDesc = switch ($ccomOption) {
-    1 { "Keep Together" }
-    2 { "Split into '_ccoms' and '_cvars'" }
-    3 { "Exclude ConCommands (ConVars only)" }
-}
-$sarDesc = switch ($sarOption) {
-    1 { "Keep Together" }
-    2 { "Split SAR into '_sar'" }
-    3 { "Exclude SAR (Engine only)" }
-    4 { "Exclude Engine (SAR only)" }
-}
-$flagActionDesc = switch ($flagActionOption) {
-    1 { "None" }
-    2 { "Exclude matching: $($selectedFlags -join ', ')" }
-    3 { "Route matching to dedicated files: $($selectedFlags -join ', ')" }
-}
-
-Write-Host "  - Source Files     : $($compatibleFiles.Count) file(s)" -ForegroundColor White
-Write-Host "  - Naming Scheme    : $namingDesc" -ForegroundColor White
-Write-Host "  - ConCommands      : $ccomDesc" -ForegroundColor White
-Write-Host "  - SAR Scope        : $sarDesc" -ForegroundColor White
-Write-Host "  - Flag Routing     : $flagActionDesc" -ForegroundColor White
-if ($enableCategorization) {
-    $prioChain = ($priorityFlags | ForEach-Object { $_.ToUpperInvariant() }) -join " -> "
-    Write-Host "  - Categorization   : Enabled ($prioChain -> OTHER)" -ForegroundColor White
-    Write-Host "  - Omit Cat. Flag   : $(if ($omitCategoryFlag) { 'Yes' } else { 'No' })" -ForegroundColor White
-} else {
-    Write-Host "  - Categorization   : Disabled (Alphabetical list)" -ForegroundColor White
-}
-Write-Host "  - Symbol Sorting   : Order B (All '+' first, then all '-', then A-Z)" -ForegroundColor White
-Write-Host "  - Inline Comments  : $(if ($includeComments) { 'Enabled (Aligned, common engine flags stripped)' } else { 'Omitted' })" -ForegroundColor White
-Write-Host "  - Output Directory : $workDir" -ForegroundColor White
-Write-Host "======================================================================" -ForegroundColor Cyan
-
-# --- Conversion Phase ---
-
-Write-Host "`n[+] Processing dump data..." -ForegroundColor Yellow
-$timer = [System.Diagnostics.Stopwatch]::StartNew()
-
-$globalBuckets = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[PSCustomObject]]]::new(
-    [System.StringComparer]::OrdinalIgnoreCase
-)
-
-$totalParsedEntries = 0
-
-foreach ($file in $compatibleFiles) {
-    $rawItems = [System.IO.File]::ReadAllText($file.FullName) | ConvertFrom-Json
-    $sourceBase = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-    $totalParsedEntries += $rawItems.Count
-
-    foreach ($item in $rawItems) {
-        if ($ccomOption -eq 3 -and $item.isCommand -eq $true) { continue }
-        if ($sarOption -eq 3 -and $item.isSAR -eq $true) { continue }
-        if ($sarOption -eq 4 -and $item.isSAR -ne $true) { continue }
-
-        $itemFlags = [System.Collections.Generic.List[string]]::new()
-        if ($item.flagsStr -and $item.flagsStr -ne 'none') {
-            foreach ($fl in ($item.flagsStr -split '\s+')) {
-                if (-not [string]::IsNullOrWhiteSpace($fl) -and $fl -ne 'none') {
-                    $itemFlags.Add($fl.ToLowerInvariant())
-                }
-            }
+            $omittedFlagCounts[$omittedByThisFlag]++
+            continue
         }
 
-        if ($flagActionOption -eq 2) {
-            $matched = $false
-            foreach ($fl in $itemFlags) {
-                if ($selectedFlags.Contains($fl)) { $matched = $true; break }
-            }
-            if ($matched) { continue }
-        }
-
-        $flagTag = ""
-        if ($flagActionOption -eq 3) {
-            foreach ($fl in $itemFlags) {
-                if ($selectedFlags.Contains($fl)) {
-                    $flagTag = $fl.ToLowerInvariant()
-                    break
-                }
-            }
-        }
-
-        $sarTag = ""
-        if ($sarOption -eq 2) {
-            $sarTag = if ($item.isSAR) { "sar" } else { "engine" }
-        }
-
-        $typeTag = ""
-        if ($ccomOption -eq 2) {
-            $typeTag = if ($item.isCommand) { "ccoms" } else { "cvars" }
-        }
-
-        $effectiveBase = switch ($namingOption) {
-            1 { $sourceBase }
-            2 { "" }
-            3 { $customBaseName }
-        }
-
-        $nameParts = [System.Collections.Generic.List[string]]::new()
-        if (-not [string]::IsNullOrWhiteSpace($effectiveBase)) { $nameParts.Add($effectiveBase) }
-        if (-not [string]::IsNullOrWhiteSpace($flagTag))        { $nameParts.Add($flagTag) }
-        if (-not [string]::IsNullOrWhiteSpace($sarTag))         { $nameParts.Add($sarTag) }
-        if (-not [string]::IsNullOrWhiteSpace($typeTag))        { $nameParts.Add($typeTag) }
-
-        if ($nameParts.Count -eq 0) { $nameParts.Add("cvars") }
-
-        $targetFileName = ($nameParts -join "_") + ".cfg"
-
-        $prefix = [string]$item.name
-        if (-not $item.isCommand -and $null -ne $item.default) {
-            $prefix += " `"$($item.default)`""
-        }
-
-        $minMaxText = ""
-        $hasMin = $null -ne $item.min
-        $hasMax = $null -ne $item.max
-        if ($hasMin -and $hasMax) {
-            $minMaxText = "[min. $($item.min) max. $($item.max)]"
-        } elseif ($hasMin) {
-            $minMaxText = "[min. $($item.min)]"
-        } elseif ($hasMax) {
-            $minMaxText = "[max. $($item.max)]"
-        }
-
+        # Optimized single-regex whitespace consolidation
         $helpText = ""
-        if (-not [string]::IsNullOrWhiteSpace($item.helpStr)) {
-            $helpText = ($item.helpStr -replace "[\r\n]+", " ").Trim()
+        if (-not [string]::IsNullOrWhiteSpace($row.helpStr)) {
+            $helpText = ($row.helpStr.Trim() -replace '\s+', ' ')
         }
 
-        if (-not $globalBuckets.ContainsKey($targetFileName)) {
-            $globalBuckets[$targetFileName] = [System.Collections.Generic.List[PSCustomObject]]::new()
-        }
+        # ConCommands omit value; ConVars use {Name} "{Value}"
+        $leftSide = if ($isCmd) { $name } else { '{0} "{1}"' -f $name, $val }
 
-        $entry = [PSCustomObject]@{
-            Name    = [string]$item.name
-            Prefix  = $prefix
-            Flags   = $itemFlags
-            MinMax  = $minMaxText
-            Help    = $helpText
-            Comment = ""
-        }
-        $globalBuckets[$targetFileName].Add($entry)
+        $parsedEntries.Add([CvarItem]::new($name, $leftSide, $isCmd, $isSar, $activeFlags, $helpText))
     }
-}
 
-# --- File Writing Phase ---
+    $rawTotal = $rawCvarCount + $rawCcomCount
+    $totalRawEncountered += $rawTotal
+    $totalOmittedByFlag += $fileOmittedByFlag
+    $totalOmittedBySar  += $fileOmittedBySar
 
-$summaryList = [System.Collections.Generic.List[PSObject]]::new()
-$totalExportedEntries = 0
+    # Comfy Step Telemetry
+    Write-Host ("  [+] Parsed Content    : {0} entries in {1}ms" -f $rawTotal, $fileSw.ElapsedMilliseconds) -ForegroundColor DarkGray
+    Write-Host ("  [+] Breakdown         : {0} ConVars, {1} ConCommands ({2} Game, {3} SAR)" -f $rawCvarCount, $rawCcomCount, $rawGameCount, $rawSarCount) -ForegroundColor DarkGray
 
-foreach ($pair in $globalBuckets.GetEnumerator()) {
-    $outPath    = [System.IO.Path]::Combine($workDir, $pair.Key)
-    $allEntries = $pair.Value
-    $fileLines  = [System.Collections.Generic.List[string]]::new()
-    $maxLen     = 0
-    $totalExportedEntries += $allEntries.Count
+    if ($fileOmittedBySar -gt 0) {
+        $sarOmittedDesc = if ($sarChoice -eq '2') { "SAR commands" } else { "Game commands" }
+        Write-Host ("  [+] Omitted (Scope)   : {0} {1}" -f $fileOmittedBySar, $sarOmittedDesc) -ForegroundColor Yellow
+    }
 
-    if ($enableCategorization) {
-        $categoryMap = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.List[PSCustomObject]]]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-        )
+    if ($fileOmittedByFlag -gt 0) {
+        $flagDetailParts = foreach ($k in $omittedFlagCounts.Keys) { "{0}: {1}" -f $k, $omittedFlagCounts[$k] }
+        Write-Host ("  [+] Omitted (Flags)   : {0} entries ({1})" -f $fileOmittedByFlag, ($flagDetailParts -join ', ')) -ForegroundColor Yellow
+    }
 
-        foreach ($pFl in $priorityFlags) {
-            $categoryMap[$pFl] = [System.Collections.Generic.List[PSCustomObject]]::new()
+    # Partition by ConVar vs ConCommand
+    $cvars = [System.Collections.Generic.List[CvarItem]]::new($parsedEntries.Count)
+    $ccoms = [System.Collections.Generic.List[CvarItem]]::new($parsedEntries.Count)
+    foreach ($entry in $parsedEntries) {
+        if ($entry.IsCmd) { [void]$ccoms.Add($entry) } else { [void]$cvars.Add($entry) }
+    }
+
+    $typeGroups = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $fileOmittedByType = 0
+
+    switch ($typeChoice) {
+        '1' {
+            $typeGroups.Add([PSCustomObject]@{ Descriptor = 'full'; Entries = $parsedEntries })
         }
-        $categoryMap["OTHER"] = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-        foreach ($entry in $allEntries) {
-            $assigned = $false
-            foreach ($pFl in $priorityFlags) {
-                if ($entry.Flags -contains $pFl) {
-                    $categoryMap[$pFl].Add($entry)
-                    $assigned = $true
-                    break
-                }
-            }
-            if (-not $assigned) {
-                $categoryMap["OTHER"].Add($entry)
-            }
+        '2' {
+            $fileOmittedByType = $ccoms.Count
+            $typeGroups.Add([PSCustomObject]@{ Descriptor = 'cvars'; Entries = $cvars })
         }
-
-        foreach ($catKey in $categoryMap.Keys) {
-            $flagForCat = if ($catKey -eq "OTHER") { "" } else { $catKey }
-            foreach ($e in $categoryMap[$catKey]) {
-                if ($includeComments) {
-                    $e.Comment = Format-EntryComment -Entry $e -CategoryFlag $flagForCat -OmitCategoryFlag $omitCategoryFlag -CommonOmitFlags $commonOmitFlags
-
-                    if (-not [string]::IsNullOrWhiteSpace($e.Comment) -and $e.Prefix.Length -gt $maxLen) {
-                        $maxLen = $e.Prefix.Length
-                    }
-                } else {
-                    $e.Comment = ""
-                }
-            }
+        '3' {
+            $fileOmittedByType = $cvars.Count
+            $typeGroups.Add([PSCustomObject]@{ Descriptor = 'ccoms'; Entries = $ccoms })
         }
+        '4' {
+            $typeGroups.Add([PSCustomObject]@{ Descriptor = 'cvars'; Entries = $cvars })
+            $typeGroups.Add([PSCustomObject]@{ Descriptor = 'ccoms'; Entries = $ccoms })
+        }
+    }
 
-        $orderedKeys = [System.Collections.Generic.List[string]]::new($priorityFlags)
-        $orderedKeys.Add("OTHER")
+    $totalOmittedByType += $fileOmittedByType
+    if ($fileOmittedByType -gt 0) {
+        $typeOmittedDesc = if ($typeChoice -eq '2') { "ConCommands" } else { "ConVariables" }
+        Write-Host ("  [+] Omitted (Type)    : {0} {1}" -f $fileOmittedByType, $typeOmittedDesc) -ForegroundColor Yellow
+    }
 
-        $firstSection = $true
-        foreach ($catKey in $orderedKeys) {
-            $rawCatEntries = $categoryMap[$catKey]
-            if ($rawCatEntries.Count -eq 0) { continue }
-
-            # Apply Order B sorting
-            $catEntries = Sort-SourceEntries -EntryList $rawCatEntries
-
-            if (-not $firstSection) { $fileLines.Add("") }
-            $firstSection = $false
-
-            $fileLines.Add("// =================")
-            $fileLines.Add("// $($catKey.ToUpperInvariant())")
-            $fileLines.Add("// =================")
-
-            foreach ($e in $catEntries) {
-                if ($includeComments -and -not [string]::IsNullOrWhiteSpace($e.Comment)) {
-                    $fileLines.Add($e.Prefix.PadRight($maxLen + 2) + "// " + $e.Comment)
-                } else {
-                    $fileLines.Add($e.Prefix)
-                }
+    # Partition by SAR vs Game if SAR Option 4 (Separate Files) was selected
+    $groups = [System.Collections.Generic.List[PSCustomObject]]::new()
+    if ($sarChoice -eq '4') {
+        foreach ($tg in $typeGroups) {
+            $gameList = [System.Collections.Generic.List[CvarItem]]::new()
+            $sarList  = [System.Collections.Generic.List[CvarItem]]::new()
+            foreach ($item in $tg.Entries) {
+                if ($item.IsSAR) { [void]$sarList.Add($item) }
+                else { [void]$gameList.Add($item) }
+            }
+            if ($gameList.Count -gt 0) {
+                $groups.Add([PSCustomObject]@{ Descriptor = "game_$($tg.Descriptor)"; Entries = $gameList })
+            }
+            if ($sarList.Count -gt 0) {
+                $groups.Add([PSCustomObject]@{ Descriptor = "sar_$($tg.Descriptor)"; Entries = $sarList })
             }
         }
     } else {
-        # Apply Order B sorting
-        $sortedEntries = Sort-SourceEntries -EntryList $allEntries
+        $groups = $typeGroups
+    }
 
-        foreach ($e in $sortedEntries) {
-            if ($includeComments) {
-                $e.Comment = Format-EntryComment -Entry $e -CategoryFlag "" -OmitCategoryFlag $false -CommonOmitFlags $commonOmitFlags
+    if ($sectionFlagOrder.Count -gt 0) {
+        $secInfo = "$($sectionFlagOrder -join ' -> ') -> OTHER"
+        if ($omitSectionFlagFromComment) { $secInfo += " (omitting flag from comments)" }
+        Write-Host ("  [+] Section Priority  : {0}" -f $secInfo) -ForegroundColor DarkGray
+    }
 
-                if (-not [string]::IsNullOrWhiteSpace($e.Comment) -and $e.Prefix.Length -gt $maxLen) {
-                    $maxLen = $e.Prefix.Length
+    $inputBase = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+    $activeCustomName = if ($customFileNames.ContainsKey($file.FullName)) { $customFileNames[$file.FullName] } else { $inputBase }
+
+    # Pre-plan target files for dynamic padding with single-pass flag separation
+    $plannedFiles = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($grp in $groups) {
+        $mainList = [System.Collections.Generic.List[CvarItem]]::new()
+        foreach ($item in $grp.Entries) {
+            [void]$mainList.Add($item)
+        }
+
+        if ($separateFlags.Count -gt 0) {
+            foreach ($flagToSeparate in $separateFlags) {
+                $flagEntries = [System.Collections.Generic.List[CvarItem]]::new()
+                foreach ($entry in $grp.Entries) {
+                    if ($entry.ActiveFlags.Contains($flagToSeparate)) {
+                        [void]$flagEntries.Add($entry)
+                    }
                 }
-            } else {
-                $e.Comment = ""
+
+                if ($flagEntries.Count -gt 0) {
+                    $flagFileName = Get-OutputFileName -NamingOption $namingChoice -InputBaseName $inputBase `
+                                                       -CustomName $activeCustomName -Descriptor $grp.Descriptor `
+                                                       -FlagName $flagToSeparate
+                    $plannedFiles.Add([PSCustomObject]@{
+                        FileName = $flagFileName
+                        FilePath = Join-Path $Directory $flagFileName
+                        Entries  = $flagEntries
+                    })
+                }
+            }
+
+            if ($removeSeparatedFromMain) {
+                $filtered = [System.Collections.Generic.List[CvarItem]]::new()
+                foreach ($item in $mainList) {
+                    $hasSep = $false
+                    foreach ($sf in $separateFlags) {
+                        if ($item.ActiveFlags.Contains($sf)) {
+                            $hasSep = $true
+                            break
+                        }
+                    }
+                    if (-not $hasSep) { [void]$filtered.Add($item) }
+                }
+                $mainList = $filtered
             }
         }
 
-        foreach ($e in $sortedEntries) {
-            if ($includeComments -and -not [string]::IsNullOrWhiteSpace($e.Comment)) {
-                $fileLines.Add($e.Prefix.PadRight($maxLen + 2) + "// " + $e.Comment)
-            } else {
-                $fileLines.Add($e.Prefix)
-            }
+        if ($mainList.Count -gt 0) {
+            $mainFileName = Get-OutputFileName -NamingOption $namingChoice -InputBaseName $inputBase `
+                                               -CustomName $activeCustomName -Descriptor $grp.Descriptor
+            $plannedFiles.Add([PSCustomObject]@{
+                FileName = $mainFileName
+                FilePath = Join-Path $Directory $mainFileName
+                Entries  = $mainList
+            })
         }
     }
 
-    [System.IO.File]::WriteAllLines($outPath, $fileLines, [System.Text.Encoding]::UTF8)
+    # Calculate tightest dynamic filename width for this batch
+    $maxFileLen = 0
+    foreach ($pf in $plannedFiles) {
+        if ($pf.FileName.Length -gt $maxFileLen) {
+            $maxFileLen = $pf.FileName.Length
+        }
+    }
 
-    $fileInfo = Get-Item -Path $outPath
-    $summaryList.Add([PSCustomObject]@{
-        OutputFile = $pair.Key
-        Entries    = $allEntries.Count
-        Size       = (Format-FileSize -Bytes $fileInfo.Length)
-    })
+    Write-Host "`n  Writing Config Files:" -ForegroundColor Cyan
+
+    foreach ($pf in $plannedFiles) {
+        $result = Write-CfgFile -FilePath $pf.FilePath `
+                               -Entries $pf.Entries `
+                               -SectionFlags $sectionFlagOrder `
+                               -OmitSectionFlag $omitSectionFlagFromComment `
+                               -FileNamePadding $maxFileLen
+
+        if ($result.Count -gt 0) {
+            $totalFilesWritten++
+            $totalEntriesWritten += $result.Count
+            foreach ($cat in $result.Categories.Keys) {
+                if (-not $globalCategoryTotals.Contains($cat)) { $globalCategoryTotals[$cat] = 0 }
+                $globalCategoryTotals[$cat] += $result.Categories[$cat]
+            }
+        }
+    }
+    Write-Host ""
 }
 
-$timer.Stop()
+$totalStopwatch.Stop()
 
-# --- Execution Metrics & Summary ---
+# =========================================================================
+# DETAILED SUMMARY METRICS
+# =========================================================================
 
-Write-Host "`n[OK] Export Completed Successfully!" -ForegroundColor Green
-$summaryList | Format-Table -AutoSize OutputFile, Entries, Size
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host "                           Conversion Summary                           " -ForegroundColor Cyan
+Write-Host "========================================================================" -ForegroundColor Cyan
+Write-Host ("  JSON Files Processed     : {0}" -f $jsonFiles.Count) -ForegroundColor Gray
 
-$elapsedFormatted = if ($timer.ElapsedMilliseconds -ge 1000) {
-    "{0:N2}s" -f ($timer.ElapsedMilliseconds / 1000.0)
+$typeOmittedDesc = if ($typeChoice -eq '2') { "ConCommands" } elseif ($typeChoice -eq '3') { "ConVariables" } else { "" }
+if ($totalOmittedByType -gt 0) {
+    Write-Host ("  Raw Entries Encountered  : {0} ({1} {2} omitted by type)" -f $totalRawEncountered, $totalOmittedByType, $typeOmittedDesc) -ForegroundColor Gray
 } else {
-    "$($timer.ElapsedMilliseconds)ms"
+    Write-Host ("  Raw Entries Encountered  : {0}" -f $totalRawEncountered) -ForegroundColor Gray
 }
 
-Write-Host "Performance Metrics:" -ForegroundColor Yellow
-Write-Host "  - Total Raw Entries Read    : $totalParsedEntries" -ForegroundColor White
-Write-Host "  - Total Filtered Entries Out: $totalExportedEntries" -ForegroundColor White
-Write-Host "  - Output Files Created      : $($globalBuckets.Count)" -ForegroundColor White
-Write-Host "  - Total Elapsed Time        : $elapsedFormatted" -ForegroundColor Green
-Write-Host "  - Output Directory          : $workDir`n" -ForegroundColor Cyan
+if ($totalOmittedBySar -gt 0) {
+    $sarOmittedDesc = if ($sarChoice -eq '2') { "SAR commands" } else { "Game commands" }
+    Write-Host ("  Entries Omitted by Scope : {0} ({1})" -f $totalOmittedBySar, $sarOmittedDesc) -ForegroundColor Yellow
+}
 
-# --- Prevent Window from Auto-Closing ---
-Write-Host ""
-$null = Read-Host "Press Enter to exit..."
+if ($omitFlags.Count -gt 0) {
+    Write-Host ("  Entries Omitted by Flag  : {0} ({1})" -f $totalOmittedByFlag, ($omitFlags -join ', ')) -ForegroundColor Yellow
+}
+
+if ($separateFlags.Count -gt 0) {
+    Write-Host ("  Entries Separated (Flag) : {0} ({1})" -f $totalSeparatedCount, ($separateFlags -join ', ')) -ForegroundColor Cyan
+}
+
+if ($globalCategoryTotals.Count -gt 0) {
+    $catSummary = foreach ($k in $globalCategoryTotals.Keys) { "{0}: {1}" -f $k, $globalCategoryTotals[$k] }
+    Write-Host ("  Categories Distributed   : {0}" -f ($catSummary -join ' | ')) -ForegroundColor Cyan
+}
+
+Write-Host ("  CFG Files Generated      : {0}" -f $totalFilesWritten) -ForegroundColor Green
+Write-Host ("  Total Entries Written    : {0}" -f $totalEntriesWritten) -ForegroundColor Green
+Write-Host ("  Total Execution Time     : {0}s ({1}ms)" -f `
+    [math]::Round($totalStopwatch.Elapsed.TotalSeconds, 2), `
+    $totalStopwatch.ElapsedMilliseconds) -ForegroundColor Gray
+Write-Host "========================================================================`n" -ForegroundColor Cyan
+
+Read-Host "Press Enter to exit"
