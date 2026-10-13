@@ -1,23 +1,3 @@
-<#
-.SYNOPSIS
-    Optimized Source Engine 'cvarlist log' to .cfg Converter.
-
-.DESCRIPTION
-    High-performance converter utilizing compiled C# sorting, single-pass pipeline-free
-    routing, dynamic telemetry padding, and interactive customization.
-#>
-
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0)]
-    [string]$Directory = $PSScriptRoot
-)
-
-if ([string]::IsNullOrWhiteSpace($Directory)) {
-    $Directory = (Get-Location).Path
-}
-
-# Compile high-performance C# item container & native comparer (Zero PowerShell ScriptBlock overhead)
 if (-not ('SourceEngineCvarComparer' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
