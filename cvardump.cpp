@@ -1,3 +1,4 @@
+#include <windows.h>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -6,7 +7,7 @@
 #include <cstring>
 
 // ============================================================================
-// Minimal Source Engine Interfaces & Classes
+// Source Engine Definitions
 // ============================================================================
 
 typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
@@ -124,7 +125,7 @@ public:
 };
 
 // ============================================================================
-// Helpers: JSON Serialization & Flag Formatting
+// Formatting
 // ============================================================================
 
 static std::string EscapeJson(const char *str) {
@@ -155,7 +156,6 @@ static std::string EscapeJson(const char *str) {
 
 static std::string GetFlagsString(int flags) {
     if (flags == 0) return "none";
-
     static const std::pair<int, const char *> flagDefs[] = {
         { (1 << 0),  "unregistered" },
         { (1 << 1),  "developmentonly" },
@@ -195,7 +195,6 @@ static std::string GetFlagsString(int flags) {
             result += entry.second;
         }
     }
-
     return result.empty() ? "unknown" : result;
 }
 
@@ -232,117 +231,88 @@ static void DumpConCommandBase(std::ofstream &file, ConCommandBase *cmd) {
 }
 
 // ============================================================================
-// Server Plugin Implementation (IServerPluginCallbacks)
+// Core Execution Logic
 // ============================================================================
 
-class IServerPluginCallbacks {
-public:
-    virtual bool            Load(CreateInterfaceFn interfaceFactory, CreateInterfaceFn gameServerFactory) = 0;
-    virtual void            Unload() = 0;
-    virtual void            Pause() = 0;
-    virtual void            UnPause() = 0;
-    virtual const char     *GetPluginDescription() = 0;
-    virtual void            LevelInit(char const *pMapName) = 0;
-    virtual void            ServerActivate(void *pEdictList, int edictCount, int clientMax) = 0;
-    virtual void            GameFrame(bool simulating) = 0;
-    virtual void            LevelShutdown() = 0;
-    virtual void            ClientActive(void *pEntity) = 0;
-    virtual void            ClientDisconnect(void *pEntity) = 0;
-    virtual void            ClientPutInServer(void *pEntity, char const *playername) = 0;
-    virtual void            SetCommandClient(int index) = 0;
-    virtual void            ClientSettingsChanged(void *pEdict) = 0;
-    virtual int             ClientConnect(bool *bAllowConnect, void *pEntity, const char *pszName, const char *pszAddress, char *reject, int maxrejectlen) = 0;
-    virtual int             ClientCommand(void *pEntity, const void *args) = 0;
-    virtual int             NetworkIDValidated(const char *pszUserName, const char *pszNetworkID) = 0;
-    virtual void            OnQueryCvarValueFinished(int iCookie, void *pPlayerEntity, int eStatus, const char *pCvarName, const char *pCvarValue) = 0;
-    virtual void            OnEdictAllocated(void *pEdict) = 0;
-    virtual void            OnEdictFreed(const void *pEdict) = 0;
-};
+static DWORD WINAPI ExecuteDump(LPVOID) {
+    Sleep(200); // Allow engine modules to settle
 
-class CVarDumperPlugin : public IServerPluginCallbacks {
-public:
-    virtual bool Load(CreateInterfaceFn interfaceFactory, CreateInterfaceFn gameServerFactory) override {
-        ICvar *pCVar = nullptr;
+    ICvar *pCVar = nullptr;
+    const char *cvarVersions[] = { "VEngineCvar007", "VEngineCvar004", "VEngineCvar003" };
 
-        const char *cvarVersions[] = {
-            "VEngineCvar007",
-            "VEngineCvar004",
-            "VEngineCvar003"
-        };
+    HMODULE hVstdlib = GetModuleHandleA("vstdlib.dll");
+    if (!hVstdlib) hVstdlib = LoadLibraryA("vstdlib.dll");
 
-        for (const char *ver : cvarVersions) {
-            pCVar = reinterpret_cast<ICvar *>(interfaceFactory(ver, nullptr));
-            if (pCVar) break;
-        }
-
-        if (!pCVar) {
-            return false;
-        }
-
-        std::ofstream outFile("cvars_dump.json", std::ios::out | std::ios::trunc);
-        if (!outFile.is_open()) {
-            return false;
-        }
-
-        outFile << "[\n";
-
-        ICvarIteratorInternal *iter = pCVar->FactoryInternalIterator();
-        if (iter) {
-            int count = 0;
-            for (iter->SetFirst(); iter->IsValid(); iter->Next()) {
-                ConCommandBase *cmd = iter->Get();
-                if (!cmd) continue;
-
-                if (count > 0) outFile << ",\n";
-                DumpConCommandBase(outFile, cmd);
-                ++count;
+    if (hVstdlib) {
+        auto vstdlibFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
+        if (vstdlibFactory) {
+            for (const char *ver : cvarVersions) {
+                pCVar = reinterpret_cast<ICvar *>(vstdlibFactory(ver, nullptr));
+                if (pCVar) break;
             }
         }
-
-        outFile << "\n]\n";
-        outFile.close();
-
-        return true;
     }
 
-    virtual void Unload() override {}
-    virtual void Pause() override {}
-    virtual void UnPause() override {}
-    virtual const char *GetPluginDescription() override { return "CVar Dumper Plugin"; }
-    virtual void LevelInit(char const *pMapName) override {}
-    virtual void ServerActivate(void *pEdictList, int edictCount, int clientMax) override {}
-    virtual void GameFrame(bool simulating) override {}
-    virtual void LevelShutdown() override {}
-    virtual void ClientActive(void *pEntity) override {}
-    virtual void ClientDisconnect(void *pEntity) override {}
-    virtual void ClientPutInServer(void *pEntity, char const *playername) override {}
-    virtual void SetCommandClient(int index) override {}
-    virtual void ClientSettingsChanged(void *pEdict) override {}
-    virtual int  ClientConnect(bool *bAllowConnect, void *pEntity, const char *pszName, const char *pszAddress, char *reject, int maxrejectlen) override { return 0; }
-    virtual int  ClientCommand(void *pEntity, const void *args) override { return 0; }
-    virtual int  NetworkIDValidated(const char *pszUserName, const char *pszNetworkID) override { return 0; }
-    virtual void OnQueryCvarValueFinished(int iCookie, void *pPlayerEntity, int eStatus, const char *pCvarName, const char *pCvarValue) override {}
-    virtual void OnEdictAllocated(void *pEdict) override {}
-    virtual void OnEdictFreed(const void *pEdict) override {}
-};
-
-static CVarDumperPlugin g_Plugin;
-
-// ============================================================================
-// DLL Export for plugin_load
-// ============================================================================
-
-#if defined(_WIN32)
-#define PLUGIN_EXPORT extern "C" __declspec(dllexport)
-#else
-#define PLUGIN_EXPORT extern "C" __attribute__((visibility("default")))
-#endif
-
-PLUGIN_EXPORT void *CreateInterface(const char *pName, int *pReturnCode) {
-    if (std::string(pName).rfind("ISERVERPLUGINCALLBACKS", 0) == 0) {
-        if (pReturnCode) *pReturnCode = 0;
-        return &g_Plugin;
+    if (!pCVar) {
+        MessageBoxA(NULL, "Could not find ICvar in vstdlib.dll!", "CVar Dumper", MB_ICONERROR | MB_OK);
+        return 0;
     }
-    if (pReturnCode) *pReturnCode = 1;
-    return nullptr;
+
+    // Determine path next to the game executable
+    char dumpPath[MAX_PATH] = {0};
+    GetModuleFileNameA(NULL, dumpPath, MAX_PATH);
+    char *lastSlash = strrchr(dumpPath, '\\');
+    if (lastSlash) {
+        *(lastSlash + 1) = '\0';
+        strcat_s(dumpPath, MAX_PATH, "cvars_dump.json");
+    } else {
+        strcpy_s(dumpPath, MAX_PATH, "cvars_dump.json");
+    }
+
+    std::ofstream outFile(dumpPath, std::ios::out | std::ios::trunc);
+    if (!outFile.is_open()) {
+        char err[512];
+        snprintf(err, sizeof(err), "Failed to write file to:\n%s", dumpPath);
+        MessageBoxA(NULL, err, "CVar Dumper", MB_ICONERROR | MB_OK);
+        return 0;
+    }
+
+    outFile << "[\n";
+    int count = 0;
+    ICvarIteratorInternal *iter = pCVar->FactoryInternalIterator();
+    if (iter) {
+        for (iter->SetFirst(); iter->IsValid(); iter->Next()) {
+            ConCommandBase *cmd = iter->Get();
+            if (!cmd) continue;
+            if (count > 0) outFile << ",\n";
+            DumpConCommandBase(outFile, cmd);
+            ++count;
+        }
+    }
+    outFile << "\n]\n";
+    outFile.close();
+
+    char successMsg[1024];
+    snprintf(successMsg, sizeof(successMsg), "SUCCESS! Dumped %d cvars to:\n\n%s", count, dumpPath);
+    MessageBoxA(NULL, successMsg, "CVar Dumper", MB_ICONINFORMATION | MB_OK);
+
+    return 0;
+}
+
+// ============================================================================
+// DllMain (Runs the moment the DLL is loaded)
+// ============================================================================
+
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
+    if (fdwReason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hinstDLL);
+        CreateThread(NULL, 0, ExecuteDump, NULL, 0, NULL);
+    }
+    return TRUE;
+}
+
+// Export for plugin_load compatibility
+extern "C" __declspec(dllexport) void *CreateInterface(const char *, int *pReturnCode) {
+    if (pReturnCode) *pReturnCode = 0;
+    return (void*)1;
 }
