@@ -3,6 +3,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <utility>
 #include <cstdint>
 #include <cstring>
@@ -13,7 +14,7 @@
 extern "C" __declspec(dllexport) void Run() {}
 
 // ============================================================================
-// ConVar / ConCommand Memory Layout (Standard Source Engine 32-bit)
+// Source Engine Struct Layouts (Standard 32-bit x86)
 // ============================================================================
 
 #pragma pack(push, 4)
@@ -21,7 +22,7 @@ struct ConCommandBase_Raw {
     void *vtable;                       // +0x00
     ConCommandBase_Raw *m_pNext;        // +0x04
     bool m_bRegistered;                 // +0x08
-    char pad[3];                        // +0x09 alignment
+    char pad[3];                        // +0x09
     const char *m_pszName;              // +0x0C
     const char *m_pszHelpString;        // +0x10
     int m_nFlags;                       // +0x14
@@ -45,7 +46,7 @@ struct ConVar_Raw : public ConCommandBase_Raw {
 #pragma pack(pop)
 
 // ============================================================================
-// Helpers
+// Formatting
 // ============================================================================
 
 static std::string EscapeJson(const char *str) {
@@ -123,22 +124,20 @@ static bool IsValidAsciiString(const char *str, size_t maxLen) {
     for (size_t i = 0; i < maxLen; ++i) {
         char c = str[i];
         if (c == '\0') return i > 0;
-        // Basic printable ASCII + tabs/newlines
         if ((c < 32 || c > 126) && c != '\t' && c != '\n' && c != '\r') return false;
     }
     return false;
 }
 
-static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outJson) {
+static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outName, std::string &outJson) {
     if (!cmd || IsBadReadPtr(cmd, sizeof(ConCommandBase_Raw))) return false;
     if (!IsValidAsciiString(cmd->m_pszName, 128)) return false;
 
-    const char *name = cmd->m_pszName;
-    const char *help = IsValidAsciiString(cmd->m_pszHelpString, 4096) ? cmd->m_pszHelpString : "";
+    outName = cmd->m_pszName;
+    const char *help = IsValidAsciiString(cmd->m_pszHelpString, 8192) ? cmd->m_pszHelpString : "";
     int flags = cmd->m_nFlags;
 
-    // Check if this is a command or a variable
-    // In ConCommandBase, IsCommand() is at vtable index 1
+    // Call IsCommand (vtable index 1)
     bool isCommand = false;
     if (cmd->vtable && !IsBadReadPtr(cmd->vtable, sizeof(void*) * 2)) {
         void **vt = reinterpret_cast<void**>(cmd->vtable);
@@ -151,7 +150,7 @@ static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outJson) {
 
     std::ostringstream ss;
     ss << "  {\n";
-    ss << "    \"name\": \"" << EscapeJson(name) << "\",\n";
+    ss << "    \"name\": \"" << EscapeJson(outName.c_str()) << "\",\n";
     ss << "    \"isCommand\": " << (isCommand ? "true" : "false") << ",\n";
     ss << "    \"helpStr\": \"" << EscapeJson(help) << "\",\n";
     ss << "    \"flags\": " << flags << ",\n";
@@ -162,8 +161,8 @@ static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outJson) {
         if (!IsBadReadPtr(cvar, sizeof(ConVar_Raw))) {
             ConVar_Raw *parent = (cvar->m_pParent && !IsBadReadPtr(cvar->m_pParent, sizeof(ConVar_Raw))) ? cvar->m_pParent : cvar;
 
-            const char *defVal = IsValidAsciiString(parent->m_pszDefaultValue, 1024) ? parent->m_pszDefaultValue : "";
-            const char *curVal = IsValidAsciiString(parent->m_pszString, 4096) ? parent->m_pszString : "";
+            const char *defVal = IsValidAsciiString(parent->m_pszDefaultValue, 2048) ? parent->m_pszDefaultValue : "";
+            const char *curVal = IsValidAsciiString(parent->m_pszString, 8192) ? parent->m_pszString : "";
 
             ss << ",\n    \"default\": \"" << EscapeJson(defVal) << "\",\n";
             ss << "    \"value\": \"" << EscapeJson(curVal) << "\"";
@@ -183,13 +182,27 @@ static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outJson) {
 }
 
 // ============================================================================
-// Safe Scan for the Real Linked List Head
+// Multi-Module Chain Discovery
 // ============================================================================
 
-static ConCommandBase_Raw* FindRealCvarHead() {
-    const char *moduleNames[] = { "engine.dll", "vstdlib.dll", "tier1.dll", "server.dll" };
+static void FindAllModuleChains(std::vector<ConCommandBase_Raw*> &foundChains) {
+    const char *modules[] = {
+        "engine.dll",
+        "client.dll",
+        "server.dll",
+        "materialsystem.dll",
+        "vstdlib.dll",
+        "tier1.dll",
+        "studiorender.dll",
+        "vguimatsurface.dll",
+        "vgui2.dll",
+        "shaderapidx9.dll",
+        "datacache.dll",
+        "soundemittersystem.dll",
+        "hl2.exe"
+    };
 
-    for (const char *modName : moduleNames) {
+    for (const char *modName : modules) {
         HMODULE hMod = GetModuleHandleA(modName);
         if (!hMod) continue;
 
@@ -201,25 +214,21 @@ static ConCommandBase_Raw* FindRealCvarHead() {
         uintptr_t base = reinterpret_cast<uintptr_t>(hMod);
         uintptr_t size = nt->OptionalHeader.SizeOfImage;
 
-        // Scan memory for an object where m_pszName points directly to "sv_cheats" or "version"
+        // Search for pointers to valid ConCommandBase structures within module data
         for (uintptr_t p = base; p < base + size - sizeof(ConVar_Raw); p += 4) {
             auto candidate = reinterpret_cast<ConCommandBase_Raw*>(p);
 
             if (!IsBadReadPtr(candidate, sizeof(ConCommandBase_Raw))) {
-                if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 16)) {
-                    if (strcmp(candidate->m_pszName, "sv_cheats") == 0 || strcmp(candidate->m_pszName, "version") == 0) {
-                        // Found a verified ConCommandBase! Now check its m_pNext pointer validity
-                        if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase_Raw))) {
-                            if (candidate->m_pNext->m_pszName && !IsBadStringPtrA(candidate->m_pNext->m_pszName, 64)) {
-                                return candidate;
-                            }
+                if (IsValidAsciiString(candidate->m_pszName, 64)) {
+                    if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase_Raw))) {
+                        if (IsValidAsciiString(candidate->m_pNext->m_pszName, 64)) {
+                            foundChains.push_back(candidate);
                         }
                     }
                 }
             }
         }
     }
-    return nullptr;
 }
 
 // ============================================================================
@@ -229,14 +238,35 @@ static ConCommandBase_Raw* FindRealCvarHead() {
 static DWORD WINAPI DumperThread(LPVOID) {
     Sleep(200);
 
-    ConCommandBase_Raw *startCmd = FindRealCvarHead();
+    std::vector<ConCommandBase_Raw*> entryPoints;
+    FindAllModuleChains(entryPoints);
 
-    if (!startCmd) {
-        MessageBoxA(NULL, "Could not locate verified ConVar chain in memory!", "Error", MB_ICONERROR);
+    if (entryPoints.empty()) {
+        MessageBoxA(NULL, "Failed to find any CVar module chains in memory!", "Error", MB_ICONERROR);
         return 0;
     }
 
-    // Determine desktop path
+    std::unordered_set<std::string> seenNames;
+    std::vector<std::string> entries;
+
+    // Traverse all discovered chains across all modules
+    for (ConCommandBase_Raw *startCmd : entryPoints) {
+        for (ConCommandBase_Raw *cmd = startCmd; cmd != nullptr; cmd = cmd->m_pNext) {
+            if (IsBadReadPtr(cmd, sizeof(ConCommandBase_Raw))) break;
+
+            std::string cvarName;
+            std::string jsonChunk;
+
+            if (FormatEntry(cmd, cvarName, jsonChunk)) {
+                if (seenNames.find(cvarName) == seenNames.end()) {
+                    seenNames.insert(cvarName);
+                    entries.push_back(jsonChunk);
+                }
+            }
+        }
+    }
+
+    // Determine output path on Desktop
     std::string dumpPath;
     const char *userProfile = getenv("USERPROFILE");
     if (userProfile && strlen(userProfile) > 0) {
@@ -249,34 +279,16 @@ static DWORD WINAPI DumperThread(LPVOID) {
     if (!outFile.is_open()) return 0;
 
     outFile << "[\n";
-
-    int count = 0;
-    std::vector<std::string> entries;
-
-    // Follow the global singly-linked list
-    for (ConCommandBase_Raw *cmd = startCmd; cmd != nullptr; cmd = cmd->m_pNext) {
-        if (IsBadReadPtr(cmd, sizeof(ConCommandBase_Raw))) break;
-
-        std::string jsonChunk;
-        if (FormatEntry(cmd, jsonChunk)) {
-            entries.push_back(jsonChunk);
-            ++count;
-        }
-
-        // Safety break in case of an invalid loop
-        if (count > 8000) break;
-    }
-
     for (size_t i = 0; i < entries.size(); ++i) {
         if (i > 0) outFile << ",\n";
         outFile << entries[i];
     }
-
     outFile << "\n]\n";
     outFile.flush();
     outFile.close();
 
-    std::string msg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars (with full values, defaults & min/max) to:\n\n" + dumpPath;
+    std::string msg = "SUCCESS!\nDumped " + std::to_string(entries.size()) + 
+                      " cvars & commands (ALL modules combined) to:\n\n" + dumpPath;
     MessageBoxA(NULL, msg.c_str(), "CVar Dumper", MB_ICONINFORMATION);
 
     return 0;
