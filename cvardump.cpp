@@ -12,39 +12,40 @@
 
 extern "C" __declspec(dllexport) void Run() {}
 
-typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
-
 // ============================================================================
-// Source Engine Struct Layouts
+// ConVar / ConCommand Memory Layout (Standard Source Engine 32-bit)
 // ============================================================================
 
-class ConCommandBase {
-public:
-    void *vtable;
-    ConCommandBase *m_pNext;
-    bool m_bRegistered;
-    const char *m_pszName;
-    const char *m_pszHelpString;
-    int m_nFlags;
+#pragma pack(push, 4)
+struct ConCommandBase_Raw {
+    void *vtable;                       // +0x00
+    ConCommandBase_Raw *m_pNext;        // +0x04
+    bool m_bRegistered;                 // +0x08
+    char pad[3];                        // +0x09 alignment
+    const char *m_pszName;              // +0x0C
+    const char *m_pszHelpString;        // +0x10
+    int m_nFlags;                       // +0x14
 };
 
-class ConVar : public ConCommandBase {
-public:
-    void *vtable_iconvar;
-    ConVar *m_pParent;
-    const char *m_pszDefaultValue;
-    char *m_pszString;
-    int m_StringLength;
-    float m_fValue;
-    int m_nValue;
-    bool m_bHasMin;
-    float m_fMinVal;
-    bool m_bHasMax;
-    float m_fMaxVal;
+struct ConVar_Raw : public ConCommandBase_Raw {
+    void *vtable_iconvar;               // +0x18
+    ConVar_Raw *m_pParent;              // +0x1C
+    const char *m_pszDefaultValue;      // +0x20
+    char *m_pszString;                  // +0x24
+    int m_StringLength;                 // +0x28
+    float m_fValue;                     // +0x2C
+    int m_nValue;                       // +0x30
+    bool m_bHasMin;                     // +0x34
+    char pad_min[3];
+    float m_fMinVal;                    // +0x38
+    bool m_bHasMax;                     // +0x3C
+    char pad_max[3];
+    float m_fMaxVal;                    // +0x40
 };
+#pragma pack(pop)
 
 // ============================================================================
-// Formatting
+// Helpers
 // ============================================================================
 
 static std::string EscapeJson(const char *str) {
@@ -117,21 +118,33 @@ static std::string GetFlagsString(int flags) {
     return result.empty() ? "unknown" : result;
 }
 
-static bool TryExtractData(ConCommandBase *cmd, std::string &outJson) {
-    if (!cmd || IsBadReadPtr(cmd, sizeof(ConCommandBase))) return false;
-    if (!cmd->m_pszName || IsBadStringPtrA(cmd->m_pszName, 256)) return false;
+static bool IsValidAsciiString(const char *str, size_t maxLen) {
+    if (!str || IsBadStringPtrA(str, 2)) return false;
+    for (size_t i = 0; i < maxLen; ++i) {
+        char c = str[i];
+        if (c == '\0') return i > 0;
+        // Basic printable ASCII + tabs/newlines
+        if ((c < 32 || c > 126) && c != '\t' && c != '\n' && c != '\r') return false;
+    }
+    return false;
+}
+
+static bool FormatEntry(ConCommandBase_Raw *cmd, std::string &outJson) {
+    if (!cmd || IsBadReadPtr(cmd, sizeof(ConCommandBase_Raw))) return false;
+    if (!IsValidAsciiString(cmd->m_pszName, 128)) return false;
 
     const char *name = cmd->m_pszName;
-    const char *help = (cmd->m_pszHelpString && !IsBadStringPtrA(cmd->m_pszHelpString, 4096)) ? cmd->m_pszHelpString : "";
+    const char *help = IsValidAsciiString(cmd->m_pszHelpString, 4096) ? cmd->m_pszHelpString : "";
     int flags = cmd->m_nFlags;
 
-    // Call IsCommand (vtable index 1)
+    // Check if this is a command or a variable
+    // In ConCommandBase, IsCommand() is at vtable index 1
     bool isCommand = false;
     if (cmd->vtable && !IsBadReadPtr(cmd->vtable, sizeof(void*) * 2)) {
-        void **vtable = reinterpret_cast<void**>(cmd->vtable);
-        if (vtable[1] && !IsBadCodePtr(reinterpret_cast<FARPROC>(vtable[1]))) {
+        void **vt = reinterpret_cast<void**>(cmd->vtable);
+        if (vt[1] && !IsBadCodePtr(reinterpret_cast<FARPROC>(vt[1]))) {
             typedef bool (__thiscall *IsCommandFn)(void*);
-            auto fn = reinterpret_cast<IsCommandFn>(vtable[1]);
+            auto fn = reinterpret_cast<IsCommandFn>(vt[1]);
             isCommand = fn(cmd);
         }
     }
@@ -145,12 +158,12 @@ static bool TryExtractData(ConCommandBase *cmd, std::string &outJson) {
     ss << "    \"flagsStr\": \"" << GetFlagsString(flags) << "\"";
 
     if (!isCommand) {
-        auto cvar = reinterpret_cast<ConVar *>(cmd);
-        if (!IsBadReadPtr(cvar, sizeof(ConVar))) {
-            ConVar *parent = (cvar->m_pParent && !IsBadReadPtr(cvar->m_pParent, sizeof(ConVar))) ? cvar->m_pParent : cvar;
+        auto cvar = reinterpret_cast<ConVar_Raw *>(cmd);
+        if (!IsBadReadPtr(cvar, sizeof(ConVar_Raw))) {
+            ConVar_Raw *parent = (cvar->m_pParent && !IsBadReadPtr(cvar->m_pParent, sizeof(ConVar_Raw))) ? cvar->m_pParent : cvar;
 
-            const char *defVal = (parent->m_pszDefaultValue && !IsBadStringPtrA(parent->m_pszDefaultValue, 1024)) ? parent->m_pszDefaultValue : "";
-            const char *curVal = (parent->m_pszString && !IsBadStringPtrA(parent->m_pszString, 4096)) ? parent->m_pszString : "";
+            const char *defVal = IsValidAsciiString(parent->m_pszDefaultValue, 1024) ? parent->m_pszDefaultValue : "";
+            const char *curVal = IsValidAsciiString(parent->m_pszString, 4096) ? parent->m_pszString : "";
 
             ss << ",\n    \"default\": \"" << EscapeJson(defVal) << "\",\n";
             ss << "    \"value\": \"" << EscapeJson(curVal) << "\"";
@@ -170,67 +183,60 @@ static bool TryExtractData(ConCommandBase *cmd, std::string &outJson) {
 }
 
 // ============================================================================
-// Worker Thread
+// Safe Scan for the Real Linked List Head
 // ============================================================================
 
-static DWORD WINAPI DumperThread(LPVOID) {
-    HMODULE hVstdlib = GetModuleHandleA("vstdlib.dll");
-    if (!hVstdlib) hVstdlib = LoadLibraryA("vstdlib.dll");
-    if (!hVstdlib) return 0;
+static ConCommandBase_Raw* FindRealCvarHead() {
+    const char *moduleNames[] = { "engine.dll", "vstdlib.dll", "tier1.dll", "server.dll" };
 
-    auto vFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
-    if (!vFactory) return 0;
+    for (const char *modName : moduleNames) {
+        HMODULE hMod = GetModuleHandleA(modName);
+        if (!hMod) continue;
 
-    void *pCVar = vFactory("VEngineCvar007", nullptr);
-    if (!pCVar) pCVar = vFactory("VEngineCvar004", nullptr);
-    if (!pCVar) pCVar = vFactory("VEngineCvar003", nullptr);
-    if (!pCVar) return 0;
+        auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(hMod);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
+        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uintptr_t>(hMod) + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) continue;
 
-    ConCommandBase *startCmd = nullptr;
-
-    // Scan the ICvar object memory for pointers that lead into the global linked list
-    uintptr_t *cvarFields = reinterpret_cast<uintptr_t *>(pCVar);
-    for (int i = 0; i < 64; ++i) {
-        ConCommandBase *candidate = reinterpret_cast<ConCommandBase *>(cvarFields[i]);
-        if (candidate && !IsBadReadPtr(candidate, sizeof(ConCommandBase))) {
-            if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 64)) {
-                if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase))) {
-                    startCmd = candidate;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Fallback: Scan module data segment
-    if (!startCmd) {
-        HMODULE hTier1 = GetModuleHandleA("tier1.dll");
-        HMODULE searchMod = hTier1 ? hTier1 : hVstdlib;
-
-        auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(searchMod);
-        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uintptr_t>(searchMod) + dos->e_lfanew);
-        uintptr_t base = reinterpret_cast<uintptr_t>(searchMod);
+        uintptr_t base = reinterpret_cast<uintptr_t>(hMod);
         uintptr_t size = nt->OptionalHeader.SizeOfImage;
 
-        for (uintptr_t p = base; p < base + size - sizeof(uintptr_t); p += sizeof(uintptr_t)) {
-            ConCommandBase *candidate = *reinterpret_cast<ConCommandBase**>(p);
-            if (candidate && !IsBadReadPtr(candidate, sizeof(ConCommandBase))) {
-                if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 64)) {
-                    if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase))) {
-                        startCmd = candidate;
-                        break;
+        // Scan memory for an object where m_pszName points directly to "sv_cheats" or "version"
+        for (uintptr_t p = base; p < base + size - sizeof(ConVar_Raw); p += 4) {
+            auto candidate = reinterpret_cast<ConCommandBase_Raw*>(p);
+
+            if (!IsBadReadPtr(candidate, sizeof(ConCommandBase_Raw))) {
+                if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 16)) {
+                    if (strcmp(candidate->m_pszName, "sv_cheats") == 0 || strcmp(candidate->m_pszName, "version") == 0) {
+                        // Found a verified ConCommandBase! Now check its m_pNext pointer validity
+                        if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase_Raw))) {
+                            if (candidate->m_pNext->m_pszName && !IsBadStringPtrA(candidate->m_pNext->m_pszName, 64)) {
+                                return candidate;
+                            }
+                        }
                     }
                 }
             }
         }
     }
+    return nullptr;
+}
+
+// ============================================================================
+// Worker Thread
+// ============================================================================
+
+static DWORD WINAPI DumperThread(LPVOID) {
+    Sleep(200);
+
+    ConCommandBase_Raw *startCmd = FindRealCvarHead();
 
     if (!startCmd) {
-        MessageBoxA(NULL, "Failed to resolve CVar linked list in memory!", "Error", MB_ICONERROR);
+        MessageBoxA(NULL, "Could not locate verified ConVar chain in memory!", "Error", MB_ICONERROR);
         return 0;
     }
 
-    // Determine path on Desktop
+    // Determine desktop path
     std::string dumpPath;
     const char *userProfile = getenv("USERPROFILE");
     if (userProfile && strlen(userProfile) > 0) {
@@ -247,14 +253,18 @@ static DWORD WINAPI DumperThread(LPVOID) {
     int count = 0;
     std::vector<std::string> entries;
 
-    for (ConCommandBase *cmd = startCmd; cmd != nullptr; cmd = cmd->m_pNext) {
-        if (IsBadReadPtr(cmd, sizeof(ConCommandBase))) break;
+    // Follow the global singly-linked list
+    for (ConCommandBase_Raw *cmd = startCmd; cmd != nullptr; cmd = cmd->m_pNext) {
+        if (IsBadReadPtr(cmd, sizeof(ConCommandBase_Raw))) break;
 
         std::string jsonChunk;
-        if (TryExtractData(cmd, jsonChunk)) {
+        if (FormatEntry(cmd, jsonChunk)) {
             entries.push_back(jsonChunk);
             ++count;
         }
+
+        // Safety break in case of an invalid loop
+        if (count > 8000) break;
     }
 
     for (size_t i = 0; i < entries.size(); ++i) {
