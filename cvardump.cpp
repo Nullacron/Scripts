@@ -1,16 +1,18 @@
 #include <windows.h>
-#include <shlobj.h>
 #include <fstream>
 #include <string>
 #include <vector>
 #include <utility>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
+
+#pragma comment(lib, "user32.lib")
 
 typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
 
 // ============================================================================
-// Source Engine CVar Structures
+// Source Engine Structures
 // ============================================================================
 
 class ConCommandBase {
@@ -75,7 +77,7 @@ public:
     virtual const char *GetCommandLineValue(const char *pVariableName) = 0;
     virtual ConVar *FindVar(const char *var_name) = 0;
     virtual const ConVar *FindVar(const char *var_name) const = 0;
-    virtual ConCommandBase *GetCommands(void) = 0;
+    virtual ConCommandBase *GetCommands() = 0;
 };
 
 // VEngineCvar007 (HL2 20th Anniversary / Portal 2 / CS:GO / Modern Source)
@@ -194,8 +196,8 @@ static std::string GetFlagsString(int flags) {
 }
 
 static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
-    const char *rawName = cmd->m_pszName;
-    const char *rawHelp = cmd->m_pszHelpString;
+    const char *rawName = cmd->m_pszName ? cmd->m_pszName : "";
+    const char *rawHelp = cmd->m_pszHelpString ? cmd->m_pszHelpString : "";
     bool isCommand = cmd->IsCommand();
     int flags = cmd->m_nFlags;
 
@@ -210,9 +212,12 @@ static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
         auto cvar = reinterpret_cast<ConVar *>(cmd);
         ConVar *parent = (cvar && cvar->m_pParent) ? cvar->m_pParent : cvar;
 
+        const char *defVal = parent->m_pszDefaultValue ? parent->m_pszDefaultValue : "";
+        const char *curVal = parent->m_pszString ? parent->m_pszString : "";
+
         file << ",\n";
-        file << "    \"default\": \"" << EscapeJson(parent->m_pszDefaultValue) << "\",\n";
-        file << "    \"value\": \"" << EscapeJson(parent->m_pszString) << "\"";
+        file << "    \"default\": \"" << EscapeJson(defVal) << "\",\n";
+        file << "    \"value\": \"" << EscapeJson(curVal) << "\"";
 
         if (parent->m_bHasMin) {
             file << ",\n    \"min\": " << parent->m_fMinVal;
@@ -225,22 +230,11 @@ static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
     file << "\n  }";
 }
 
-static bool SafeDumpEntry(std::ofstream &file, ConCommandBase *cmd) {
-    __try {
-        if (!cmd || !cmd->m_pszName) return false;
-        FormatAndWriteCvar(file, cmd);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 // ============================================================================
 // Worker Thread
 // ============================================================================
 
-static DWORD WINAPI DumperThread(LPVOID hModule) {
-    // Wait briefly for all game modules to stabilize
+static DWORD WINAPI DumperThread(LPVOID) {
     Sleep(500);
 
     HMODULE hVstdlib = GetModuleHandleA("vstdlib.dll");
@@ -256,7 +250,6 @@ static DWORD WINAPI DumperThread(LPVOID hModule) {
         return 0;
     }
 
-    // Try VEngineCvar007 first, then VEngineCvar004
     void *cvarInterface = vstdlibFactory("VEngineCvar007", nullptr);
     bool is007 = (cvarInterface != nullptr);
 
@@ -272,19 +265,23 @@ static DWORD WINAPI DumperThread(LPVOID hModule) {
         return 0;
     }
 
-    // Save to the Desktop so we never run into permissions/read-only issues
-    char dumpPath[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, dumpPath))) {
-        strcat_s(dumpPath, MAX_PATH, "\\cvars_dump.json");
+    // Determine path directly on Desktop
+    std::string dumpPath;
+    const char *userProfile = getenv("USERPROFILE");
+    if (userProfile && strlen(userProfile) > 0) {
+        dumpPath = std::string(userProfile) + "\\Desktop\\cvars_dump.json";
     } else {
-        strcpy_s(dumpPath, MAX_PATH, "C:\\cvars_dump.json");
+        char exePath[MAX_PATH] = {0};
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char *lastSlash = strrchr(exePath, '\\');
+        if (lastSlash) *(lastSlash + 1) = '\0';
+        dumpPath = std::string(exePath) + "cvars_dump.json";
     }
 
     std::ofstream outFile(dumpPath, std::ios::out | std::ios::trunc);
     if (!outFile.is_open()) {
-        char err[512];
-        snprintf(err, sizeof(err), "Could not open file for writing at:\n%s", dumpPath);
-        MessageBoxA(NULL, err, "Error", MB_ICONERROR);
+        std::string err = "Could not open file for writing at:\n" + dumpPath;
+        MessageBoxA(NULL, err.c_str(), "Error", MB_ICONERROR);
         return 0;
     }
 
@@ -293,58 +290,44 @@ static DWORD WINAPI DumperThread(LPVOID hModule) {
 
     if (is007) {
         auto cvar007 = reinterpret_cast<ICvar007 *>(cvarInterface);
-        ICvarIteratorInternal *iter = nullptr;
-        __try {
-            iter = cvar007->FactoryInternalIterator();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            iter = nullptr;
-        }
-
+        ICvarIteratorInternal *iter = cvar007->FactoryInternalIterator();
         if (iter) {
             for (iter->SetFirst(); iter->IsValid(); iter->Next()) {
                 ConCommandBase *cmd = iter->Get();
-                if (!cmd) continue;
+                if (!cmd || !cmd->m_pszName) continue;
                 if (count > 0) outFile << ",\n";
-                if (SafeDumpEntry(outFile, cmd)) {
-                    ++count;
-                }
+                FormatAndWriteCvar(outFile, cmd);
+                ++count;
             }
         }
     } else {
         auto cvar004 = reinterpret_cast<ICvar004 *>(cvarInterface);
-        ConCommandBase *head = nullptr;
-        __try {
-            head = cvar004->GetCommands();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            head = nullptr;
-        }
-
+        ConCommandBase *head = cvar004->GetCommands();
         for (ConCommandBase *cmd = head; cmd != nullptr; cmd = cmd->m_pNext) {
+            if (!cmd || !cmd->m_pszName) continue;
             if (count > 0) outFile << ",\n";
-            if (SafeDumpEntry(outFile, cmd)) {
-                ++count;
-            }
+            FormatAndWriteCvar(outFile, cmd);
+            ++count;
         }
     }
 
     outFile << "\n]\n";
     outFile.close();
 
-    char successMsg[1024];
-    snprintf(successMsg, sizeof(successMsg), "SUCCESS!\nDumped %d cvars directly to your Desktop:\n\n%s", count, dumpPath);
-    MessageBoxA(NULL, successMsg, "CVar Dumper", MB_ICONINFORMATION | MB_OK);
+    std::string successMsg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars directly to your Desktop:\n\n" + dumpPath;
+    MessageBoxA(NULL, successMsg.c_str(), "CVar Dumper", MB_ICONINFORMATION);
 
     return 0;
 }
 
 // ============================================================================
-// DllMain (Fires the moment Cheat Engine injects it)
+// DllMain
 // ============================================================================
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
-        CreateThread(NULL, 0, DumperThread, hinstDLL, 0, NULL);
+        CreateThread(NULL, 0, DumperThread, NULL, 0, NULL);
     }
     return TRUE;
 }
