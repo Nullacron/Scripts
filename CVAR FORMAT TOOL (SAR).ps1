@@ -1,3 +1,8 @@
+if ([string]::IsNullOrWhiteSpace($Directory)) {
+    $Directory = (Get-Location).Path
+}
+
+# Compile high-performance C# item container, native comment generator, & comparer
 if (-not ('SourceEngineCvarComparer' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
