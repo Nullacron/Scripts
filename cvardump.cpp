@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <utility>
@@ -116,58 +117,56 @@ static std::string GetFlagsString(int flags) {
     return result.empty() ? "unknown" : result;
 }
 
-// Call IsCommand via its standard vtable offset (virtual index 1)
-static bool CallIsCommand(ConCommandBase *cmd) {
-    __try {
-        void **vtable = *(void***)cmd;
-        typedef bool (__thiscall *IsCommandFn)(void*);
-        IsCommandFn fn = (IsCommandFn)vtable[1];
-        return fn(cmd);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
 static bool TryExtractData(ConCommandBase *cmd, std::string &outJson) {
-    __try {
-        if (!cmd || !cmd->m_pszName || IsBadStringPtrA(cmd->m_pszName, 256)) return false;
+    if (!cmd || IsBadReadPtr(cmd, sizeof(ConCommandBase))) return false;
+    if (!cmd->m_pszName || IsBadStringPtrA(cmd->m_pszName, 256)) return false;
 
-        const char *name = cmd->m_pszName;
-        const char *help = (cmd->m_pszHelpString && !IsBadStringPtrA(cmd->m_pszHelpString, 4096)) ? cmd->m_pszHelpString : "";
-        int flags = cmd->m_nFlags;
-        bool isCommand = CallIsCommand(cmd);
+    const char *name = cmd->m_pszName;
+    const char *help = (cmd->m_pszHelpString && !IsBadStringPtrA(cmd->m_pszHelpString, 4096)) ? cmd->m_pszHelpString : "";
+    int flags = cmd->m_nFlags;
 
-        std::string entry = "  {\n";
-        entry += "    \"name\": \"" + EscapeJson(name) + "\",\n";
-        entry += "    \"isCommand\": " + std::string(isCommand ? "true" : "false") + ",\n";
-        entry += "    \"helpStr\": \"" + EscapeJson(help) + "\",\n";
-        entry += "    \"flags\": " + std::to_string(flags) + ",\n";
-        entry += "    \"flagsStr\": \"" + GetFlagsString(flags) + "\"";
+    // Call IsCommand (vtable index 1)
+    bool isCommand = false;
+    if (cmd->vtable && !IsBadReadPtr(cmd->vtable, sizeof(void*) * 2)) {
+        void **vtable = reinterpret_cast<void**>(cmd->vtable);
+        if (vtable[1] && !IsBadCodePtr(reinterpret_cast<FARPROC>(vtable[1]))) {
+            typedef bool (__thiscall *IsCommandFn)(void*);
+            auto fn = reinterpret_cast<IsCommandFn>(vtable[1]);
+            isCommand = fn(cmd);
+        }
+    }
 
-        if (!isCommand) {
-            auto cvar = reinterpret_cast<ConVar *>(cmd);
-            ConVar *parent = (cvar->m_pParent) ? cvar->m_pParent : cvar;
+    std::ostringstream ss;
+    ss << "  {\n";
+    ss << "    \"name\": \"" << EscapeJson(name) << "\",\n";
+    ss << "    \"isCommand\": " << (isCommand ? "true" : "false") << ",\n";
+    ss << "    \"helpStr\": \"" << EscapeJson(help) << "\",\n";
+    ss << "    \"flags\": " << flags << ",\n";
+    ss << "    \"flagsStr\": \"" << GetFlagsString(flags) << "\"";
+
+    if (!isCommand) {
+        auto cvar = reinterpret_cast<ConVar *>(cmd);
+        if (!IsBadReadPtr(cvar, sizeof(ConVar))) {
+            ConVar *parent = (cvar->m_pParent && !IsBadReadPtr(cvar->m_pParent, sizeof(ConVar))) ? cvar->m_pParent : cvar;
 
             const char *defVal = (parent->m_pszDefaultValue && !IsBadStringPtrA(parent->m_pszDefaultValue, 1024)) ? parent->m_pszDefaultValue : "";
             const char *curVal = (parent->m_pszString && !IsBadStringPtrA(parent->m_pszString, 4096)) ? parent->m_pszString : "";
 
-            entry += ",\n    \"default\": \"" + EscapeJson(defVal) + "\",\n";
-            entry += "    \"value\": \"" + EscapeJson(curVal) + "\"";
+            ss << ",\n    \"default\": \"" << EscapeJson(defVal) << "\",\n";
+            ss << "    \"value\": \"" << EscapeJson(curVal) << "\"";
 
             if (parent->m_bHasMin) {
-                entry += ",\n    \"min\": " + std::to_string(parent->m_fMinVal);
+                ss << ",\n    \"min\": " << parent->m_fMinVal;
             }
             if (parent->m_bHasMax) {
-                entry += ",\n    \"max\": " + std::to_string(parent->m_fMaxVal);
+                ss << ",\n    \"max\": " << parent->m_fMaxVal;
             }
         }
-
-        entry += "\n  }";
-        outJson = entry;
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
     }
+
+    ss << "\n  }";
+    outJson = ss.str();
+    return true;
 }
 
 // ============================================================================
@@ -187,12 +186,9 @@ static DWORD WINAPI DumperThread(LPVOID) {
     if (!pCVar) pCVar = vFactory("VEngineCvar003", nullptr);
     if (!pCVar) return 0;
 
-    // In CCvar, m_pConCommandList is stored as a pointer field.
-    // Instead of guessing vtables, let's grab a known cvar: "sv_cheats"
-    // FindVar is located in the first few virtual functions across all engines.
     ConCommandBase *startCmd = nullptr;
 
-    // Scan the ICvar object memory for pointers that lead into a linked list
+    // Scan the ICvar object memory for pointers that lead into the global linked list
     uintptr_t *cvarFields = reinterpret_cast<uintptr_t *>(pCVar);
     for (int i = 0; i < 64; ++i) {
         ConCommandBase *candidate = reinterpret_cast<ConCommandBase *>(cvarFields[i]);
@@ -206,23 +202,21 @@ static DWORD WINAPI DumperThread(LPVOID) {
         }
     }
 
-    // Fallback: If not found in members, search vstdlib's data segment for the head pointer
+    // Fallback: Scan module data segment
     if (!startCmd) {
-        MODULEINFO modInfo = {0};
         HMODULE hTier1 = GetModuleHandleA("tier1.dll");
         HMODULE searchMod = hTier1 ? hTier1 : hVstdlib;
 
-        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)searchMod;
-        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)((uintptr_t)searchMod + dos->e_lfanew);
-        uintptr_t base = (uintptr_t)searchMod;
+        auto dos = reinterpret_cast<IMAGE_DOS_HEADER*>(searchMod);
+        auto nt = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uintptr_t>(searchMod) + dos->e_lfanew);
+        uintptr_t base = reinterpret_cast<uintptr_t>(searchMod);
         uintptr_t size = nt->OptionalHeader.SizeOfImage;
 
-        for (uintptr_t p = base; p < base + size - sizeof(uintptr_t); p += 4) {
-            ConCommandBase *candidate = *(ConCommandBase**)p;
+        for (uintptr_t p = base; p < base + size - sizeof(uintptr_t); p += sizeof(uintptr_t)) {
+            ConCommandBase *candidate = *reinterpret_cast<ConCommandBase**>(p);
             if (candidate && !IsBadReadPtr(candidate, sizeof(ConCommandBase))) {
                 if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 64)) {
                     if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase))) {
-                        // Found a valid node in the list
                         startCmd = candidate;
                         break;
                     }
@@ -250,7 +244,6 @@ static DWORD WINAPI DumperThread(LPVOID) {
 
     outFile << "[\n";
 
-    // Follow the global singly-linked list
     int count = 0;
     std::vector<std::string> entries;
 
