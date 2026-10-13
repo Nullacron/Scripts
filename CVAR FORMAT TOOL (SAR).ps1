@@ -1,23 +1,3 @@
-<#
-.SYNOPSIS
-    Optimized SourceAutoRecord (SAR) 'sar_cvars_dump all' JSON to .cfg Converter.
-
-.DESCRIPTION
-    High-performance converter utilizing compiled C# sorting, native C# comment
-    formatting, cached JSON deserialization, dynamic padding, and interactive customization.
-#>
-
-[CmdletBinding()]
-param(
-    [Parameter(Position = 0)]
-    [string]$Directory = $PSScriptRoot
-)
-
-if ([string]::IsNullOrWhiteSpace($Directory)) {
-    $Directory = (Get-Location).Path
-}
-
-# Compile high-performance C# item container, native comment generator, & comparer
 if (-not ('SourceEngineCvarComparer' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
