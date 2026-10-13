@@ -9,27 +9,17 @@
 
 #pragma comment(lib, "user32.lib")
 
-// Export so Cheat Engine will never jump to address 0 if OK is pressed
 extern "C" __declspec(dllexport) void Run() {}
 
 typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
 
 // ============================================================================
-// Source Engine Structures
+// Source Engine Struct Layouts
 // ============================================================================
 
 class ConCommandBase {
 public:
-    virtual ~ConCommandBase() {}
-    virtual bool IsCommand() const = 0;
-    virtual bool IsFlagSet(int flag) const = 0;
-    virtual void AddFlags(int flags) = 0;
-    virtual const char *GetName() const = 0;
-    virtual const char *GetHelpText() const = 0;
-    virtual bool IsRegistered() const = 0;
-    virtual int GetDLLIdentifier() const = 0;
-    virtual void CreateBase(const char *pName, const char *pHelpString = 0, int flags = 0) = 0;
-
+    void *vtable;
     ConCommandBase *m_pNext;
     bool m_bRegistered;
     const char *m_pszName;
@@ -37,17 +27,9 @@ public:
     int m_nFlags;
 };
 
-class IConVar {
+class ConVar : public ConCommandBase {
 public:
-    virtual void SetValue(const char *pValue) = 0;
-    virtual void SetValue(float flValue) = 0;
-    virtual void SetValue(int nValue) = 0;
-    virtual const char *GetName() const = 0;
-    virtual bool IsFlagSet(int nFlag) const = 0;
-};
-
-class ConVar : public ConCommandBase, public IConVar {
-public:
+    void *vtable_iconvar;
     ConVar *m_pParent;
     const char *m_pszDefaultValue;
     char *m_pszString;
@@ -58,68 +40,6 @@ public:
     float m_fMinVal;
     bool m_bHasMax;
     float m_fMaxVal;
-};
-
-class IAppSystem {
-public:
-    virtual bool Connect(CreateInterfaceFn factory) = 0;
-    virtual void Disconnect() = 0;
-    virtual void *QueryInterface(const char *pInterfaceName) = 0;
-    virtual int Init() = 0;
-    virtual void Shutdown() = 0;
-    virtual const void* GetDependencies() = 0;
-    virtual int GetTier() = 0;
-    virtual void Reconnect(CreateInterfaceFn factory, const char *pInterfaceName) = 0;
-    virtual bool IsSingleton() = 0;
-};
-
-class ICvar004 : public IAppSystem {
-public:
-    virtual void RegisterConCommandBase(ConCommandBase *variable) = 0;
-    virtual const char *GetCommandLineValue(const char *pVariableName) = 0;
-    virtual ConVar *FindVar(const char *var_name) = 0;
-    virtual const ConVar *FindVar(const char *var_name) const = 0;
-    virtual ConCommandBase *GetCommands() = 0;
-};
-
-class ICvarIteratorInternal {
-public:
-    virtual void SetFirst() = 0;
-    virtual void Next() = 0;
-    virtual bool IsValid() = 0;
-    virtual ConCommandBase *Get() = 0;
-};
-
-class ICvar007 : public IAppSystem {
-public:
-    virtual int AllocateDLLIdentifier() = 0;
-    virtual void RegisterConCommand(ConCommandBase *pCommandBase) = 0;
-    virtual void UnregisterConCommand(ConCommandBase *pCommandBase) = 0;
-    virtual void UnregisterConCommands(int id) = 0;
-    virtual const char *GetCommandLineValue(const char *pVariableName) = 0;
-    virtual ConCommandBase *FindCommandBase(const char *name) = 0;
-    virtual const ConCommandBase *FindCommandBase(const char *name) const = 0;
-    virtual ConVar *FindVar(const char *var_name) = 0;
-    virtual const ConVar *FindVar(const char *var_name) const = 0;
-    virtual void *FindCommand(const char *name) = 0;
-    virtual const void *FindCommand(const char *name) const = 0;
-    virtual void InstallGlobalChangeCallback(void *callback) = 0;
-    virtual void RemoveGlobalChangeCallback(void *callback) = 0;
-    virtual void CallGlobalChangeCallbacks(ConVar *var, const char *pOldString, float flOldValue) = 0;
-    virtual void InstallConsoleDisplayFunc(void *pDisplayFunc) = 0;
-    virtual void RemoveConsoleDisplayFunc(void *pDisplayFunc) = 0;
-    virtual void ConsoleColorPrintf(const void *clr, const char *pFormat, ...) const = 0;
-    virtual void ConsolePrintf(const char *pFormat, ...) const = 0;
-    virtual void ConsoleDPrintf(const char *pFormat, ...) const = 0;
-    virtual void RevertFlaggedConVars(int nFlag) = 0;
-    virtual void InstallCVarQuery(void *pQuery) = 0;
-    virtual bool IsMaterialThreadSetAllowed() const = 0;
-    virtual void QueueMaterialThreadSetValue(ConVar *pConVar, const char *pValue) = 0;
-    virtual void QueueMaterialThreadSetValue(ConVar *pConVar, int nValue) = 0;
-    virtual void QueueMaterialThreadSetValue(ConVar *pConVar, float flValue) = 0;
-    virtual bool HasQueuedMaterialThreadConVarSets() const = 0;
-    virtual int ProcessQueuedMaterialThreadConVarSets() = 0;
-    virtual ICvarIteratorInternal *FactoryInternalIterator() = 0;
 };
 
 // ============================================================================
@@ -196,39 +116,58 @@ static std::string GetFlagsString(int flags) {
     return result.empty() ? "unknown" : result;
 }
 
-static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
-    const char *rawName = cmd->m_pszName ? cmd->m_pszName : "";
-    const char *rawHelp = cmd->m_pszHelpString ? cmd->m_pszHelpString : "";
-    bool isCommand = cmd->IsCommand();
-    int flags = cmd->m_nFlags;
-
-    file << "  {\n";
-    file << "    \"name\": \"" << EscapeJson(rawName) << "\",\n";
-    file << "    \"isCommand\": " << (isCommand ? "true" : "false") << ",\n";
-    file << "    \"helpStr\": \"" << EscapeJson(rawHelp) << "\",\n";
-    file << "    \"flags\": " << flags << ",\n";
-    file << "    \"flagsStr\": \"" << GetFlagsString(flags) << "\"";
-
-    if (!isCommand) {
-        auto cvar = reinterpret_cast<ConVar *>(cmd);
-        ConVar *parent = (cvar && cvar->m_pParent) ? cvar->m_pParent : cvar;
-
-        const char *defVal = parent->m_pszDefaultValue ? parent->m_pszDefaultValue : "";
-        const char *curVal = parent->m_pszString ? parent->m_pszString : "";
-
-        file << ",\n";
-        file << "    \"default\": \"" << EscapeJson(defVal) << "\",\n";
-        file << "    \"value\": \"" << EscapeJson(curVal) << "\"";
-
-        if (parent->m_bHasMin) {
-            file << ",\n    \"min\": " << parent->m_fMinVal;
-        }
-        if (parent->m_bHasMax) {
-            file << ",\n    \"max\": " << parent->m_fMaxVal;
-        }
+// Call IsCommand via its standard vtable offset (virtual index 1)
+static bool CallIsCommand(ConCommandBase *cmd) {
+    __try {
+        void **vtable = *(void***)cmd;
+        typedef bool (__thiscall *IsCommandFn)(void*);
+        IsCommandFn fn = (IsCommandFn)vtable[1];
+        return fn(cmd);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
+}
 
-    file << "\n  }";
+static bool TryExtractData(ConCommandBase *cmd, std::string &outJson) {
+    __try {
+        if (!cmd || !cmd->m_pszName || IsBadStringPtrA(cmd->m_pszName, 256)) return false;
+
+        const char *name = cmd->m_pszName;
+        const char *help = (cmd->m_pszHelpString && !IsBadStringPtrA(cmd->m_pszHelpString, 4096)) ? cmd->m_pszHelpString : "";
+        int flags = cmd->m_nFlags;
+        bool isCommand = CallIsCommand(cmd);
+
+        std::string entry = "  {\n";
+        entry += "    \"name\": \"" + EscapeJson(name) + "\",\n";
+        entry += "    \"isCommand\": " + std::string(isCommand ? "true" : "false") + ",\n";
+        entry += "    \"helpStr\": \"" + EscapeJson(help) + "\",\n";
+        entry += "    \"flags\": " + std::to_string(flags) + ",\n";
+        entry += "    \"flagsStr\": \"" + GetFlagsString(flags) + "\"";
+
+        if (!isCommand) {
+            auto cvar = reinterpret_cast<ConVar *>(cmd);
+            ConVar *parent = (cvar->m_pParent) ? cvar->m_pParent : cvar;
+
+            const char *defVal = (parent->m_pszDefaultValue && !IsBadStringPtrA(parent->m_pszDefaultValue, 1024)) ? parent->m_pszDefaultValue : "";
+            const char *curVal = (parent->m_pszString && !IsBadStringPtrA(parent->m_pszString, 4096)) ? parent->m_pszString : "";
+
+            entry += ",\n    \"default\": \"" + EscapeJson(defVal) + "\",\n";
+            entry += "    \"value\": \"" + EscapeJson(curVal) + "\"";
+
+            if (parent->m_bHasMin) {
+                entry += ",\n    \"min\": " + std::to_string(parent->m_fMinVal);
+            }
+            if (parent->m_bHasMax) {
+                entry += ",\n    \"max\": " + std::to_string(parent->m_fMaxVal);
+            }
+        }
+
+        entry += "\n  }";
+        outJson = entry;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 // ============================================================================
@@ -240,20 +179,64 @@ static DWORD WINAPI DumperThread(LPVOID) {
     if (!hVstdlib) hVstdlib = LoadLibraryA("vstdlib.dll");
     if (!hVstdlib) return 0;
 
-    auto vstdlibFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
-    if (!vstdlibFactory) return 0;
+    auto vFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
+    if (!vFactory) return 0;
 
-    void *cvarInterface = vstdlibFactory("VEngineCvar007", nullptr);
-    bool is007 = (cvarInterface != nullptr);
+    void *pCVar = vFactory("VEngineCvar007", nullptr);
+    if (!pCVar) pCVar = vFactory("VEngineCvar004", nullptr);
+    if (!pCVar) pCVar = vFactory("VEngineCvar003", nullptr);
+    if (!pCVar) return 0;
 
-    if (!cvarInterface) {
-        cvarInterface = vstdlibFactory("VEngineCvar004", nullptr);
+    // In CCvar, m_pConCommandList is stored as a pointer field.
+    // Instead of guessing vtables, let's grab a known cvar: "sv_cheats"
+    // FindVar is located in the first few virtual functions across all engines.
+    ConCommandBase *startCmd = nullptr;
+
+    // Scan the ICvar object memory for pointers that lead into a linked list
+    uintptr_t *cvarFields = reinterpret_cast<uintptr_t *>(pCVar);
+    for (int i = 0; i < 64; ++i) {
+        ConCommandBase *candidate = reinterpret_cast<ConCommandBase *>(cvarFields[i]);
+        if (candidate && !IsBadReadPtr(candidate, sizeof(ConCommandBase))) {
+            if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 64)) {
+                if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase))) {
+                    startCmd = candidate;
+                    break;
+                }
+            }
+        }
     }
-    if (!cvarInterface) {
-        cvarInterface = vstdlibFactory("VEngineCvar003", nullptr);
-    }
-    if (!cvarInterface) return 0;
 
+    // Fallback: If not found in members, search vstdlib's data segment for the head pointer
+    if (!startCmd) {
+        MODULEINFO modInfo = {0};
+        HMODULE hTier1 = GetModuleHandleA("tier1.dll");
+        HMODULE searchMod = hTier1 ? hTier1 : hVstdlib;
+
+        IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)searchMod;
+        IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)((uintptr_t)searchMod + dos->e_lfanew);
+        uintptr_t base = (uintptr_t)searchMod;
+        uintptr_t size = nt->OptionalHeader.SizeOfImage;
+
+        for (uintptr_t p = base; p < base + size - sizeof(uintptr_t); p += 4) {
+            ConCommandBase *candidate = *(ConCommandBase**)p;
+            if (candidate && !IsBadReadPtr(candidate, sizeof(ConCommandBase))) {
+                if (candidate->m_pszName && !IsBadStringPtrA(candidate->m_pszName, 64)) {
+                    if (candidate->m_pNext && !IsBadReadPtr(candidate->m_pNext, sizeof(ConCommandBase))) {
+                        // Found a valid node in the list
+                        startCmd = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!startCmd) {
+        MessageBoxA(NULL, "Failed to resolve CVar linked list in memory!", "Error", MB_ICONERROR);
+        return 0;
+    }
+
+    // Determine path on Desktop
     std::string dumpPath;
     const char *userProfile = getenv("USERPROFILE");
     if (userProfile && strlen(userProfile) > 0) {
@@ -266,38 +249,31 @@ static DWORD WINAPI DumperThread(LPVOID) {
     if (!outFile.is_open()) return 0;
 
     outFile << "[\n";
-    outFile.flush();
-    int count = 0;
 
-    if (is007) {
-        auto cvar007 = reinterpret_cast<ICvar007 *>(cvarInterface);
-        ICvarIteratorInternal *iter = cvar007->FactoryInternalIterator();
-        if (iter) {
-            for (iter->SetFirst(); iter->IsValid(); iter->Next()) {
-                ConCommandBase *cmd = iter->Get();
-                if (!cmd || !cmd->m_pszName) continue;
-                if (count > 0) outFile << ",\n";
-                FormatAndWriteCvar(outFile, cmd);
-                outFile.flush();
-                ++count;
-            }
-        }
-    } else {
-        auto cvar004 = reinterpret_cast<ICvar004 *>(cvarInterface);
-        ConCommandBase *head = cvar004->GetCommands();
-        for (ConCommandBase *cmd = head; cmd != nullptr; cmd = cmd->m_pNext) {
-            if (!cmd || !cmd->m_pszName) continue;
-            if (count > 0) outFile << ",\n";
-            FormatAndWriteCvar(outFile, cmd);
-            outFile.flush();
+    // Follow the global singly-linked list
+    int count = 0;
+    std::vector<std::string> entries;
+
+    for (ConCommandBase *cmd = startCmd; cmd != nullptr; cmd = cmd->m_pNext) {
+        if (IsBadReadPtr(cmd, sizeof(ConCommandBase))) break;
+
+        std::string jsonChunk;
+        if (TryExtractData(cmd, jsonChunk)) {
+            entries.push_back(jsonChunk);
             ++count;
         }
     }
 
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i > 0) outFile << ",\n";
+        outFile << entries[i];
+    }
+
     outFile << "\n]\n";
+    outFile.flush();
     outFile.close();
 
-    std::string msg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars to your Desktop:\n\n" + dumpPath;
+    std::string msg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars (with full values, defaults & min/max) to:\n\n" + dumpPath;
     MessageBoxA(NULL, msg.c_str(), "CVar Dumper", MB_ICONINFORMATION);
 
     return 0;
