@@ -9,6 +9,9 @@
 
 #pragma comment(lib, "user32.lib")
 
+// Export so Cheat Engine will never jump to address 0 if OK is pressed
+extern "C" __declspec(dllexport) void Run() {}
+
 typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
 
 // ============================================================================
@@ -70,7 +73,6 @@ public:
     virtual bool IsSingleton() = 0;
 };
 
-// VEngineCvar004 (Half-Life 2 classic / Source 2004-2013)
 class ICvar004 : public IAppSystem {
 public:
     virtual void RegisterConCommandBase(ConCommandBase *variable) = 0;
@@ -80,7 +82,6 @@ public:
     virtual ConCommandBase *GetCommands() = 0;
 };
 
-// VEngineCvar007 (HL2 20th Anniversary / Portal 2 / CS:GO / Modern Source)
 class ICvarIteratorInternal {
 public:
     virtual void SetFirst() = 0;
@@ -235,20 +236,12 @@ static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
 // ============================================================================
 
 static DWORD WINAPI DumperThread(LPVOID) {
-    Sleep(500);
-
     HMODULE hVstdlib = GetModuleHandleA("vstdlib.dll");
     if (!hVstdlib) hVstdlib = LoadLibraryA("vstdlib.dll");
-    if (!hVstdlib) {
-        MessageBoxA(NULL, "Could not locate vstdlib.dll!", "Error", MB_ICONERROR);
-        return 0;
-    }
+    if (!hVstdlib) return 0;
 
     auto vstdlibFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
-    if (!vstdlibFactory) {
-        MessageBoxA(NULL, "Could not find CreateInterface in vstdlib.dll!", "Error", MB_ICONERROR);
-        return 0;
-    }
+    if (!vstdlibFactory) return 0;
 
     void *cvarInterface = vstdlibFactory("VEngineCvar007", nullptr);
     bool is007 = (cvarInterface != nullptr);
@@ -259,33 +252,21 @@ static DWORD WINAPI DumperThread(LPVOID) {
     if (!cvarInterface) {
         cvarInterface = vstdlibFactory("VEngineCvar003", nullptr);
     }
+    if (!cvarInterface) return 0;
 
-    if (!cvarInterface) {
-        MessageBoxA(NULL, "Failed to get ICvar interface from vstdlib.dll!", "Error", MB_ICONERROR);
-        return 0;
-    }
-
-    // Determine path directly on Desktop
     std::string dumpPath;
     const char *userProfile = getenv("USERPROFILE");
     if (userProfile && strlen(userProfile) > 0) {
         dumpPath = std::string(userProfile) + "\\Desktop\\cvars_dump.json";
     } else {
-        char exePath[MAX_PATH] = {0};
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        char *lastSlash = strrchr(exePath, '\\');
-        if (lastSlash) *(lastSlash + 1) = '\0';
-        dumpPath = std::string(exePath) + "cvars_dump.json";
+        dumpPath = "cvars_dump.json";
     }
 
     std::ofstream outFile(dumpPath, std::ios::out | std::ios::trunc);
-    if (!outFile.is_open()) {
-        std::string err = "Could not open file for writing at:\n" + dumpPath;
-        MessageBoxA(NULL, err.c_str(), "Error", MB_ICONERROR);
-        return 0;
-    }
+    if (!outFile.is_open()) return 0;
 
     outFile << "[\n";
+    outFile.flush();
     int count = 0;
 
     if (is007) {
@@ -297,6 +278,7 @@ static DWORD WINAPI DumperThread(LPVOID) {
                 if (!cmd || !cmd->m_pszName) continue;
                 if (count > 0) outFile << ",\n";
                 FormatAndWriteCvar(outFile, cmd);
+                outFile.flush();
                 ++count;
             }
         }
@@ -307,6 +289,7 @@ static DWORD WINAPI DumperThread(LPVOID) {
             if (!cmd || !cmd->m_pszName) continue;
             if (count > 0) outFile << ",\n";
             FormatAndWriteCvar(outFile, cmd);
+            outFile.flush();
             ++count;
         }
     }
@@ -314,15 +297,11 @@ static DWORD WINAPI DumperThread(LPVOID) {
     outFile << "\n]\n";
     outFile.close();
 
-    std::string successMsg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars directly to your Desktop:\n\n" + dumpPath;
-    MessageBoxA(NULL, successMsg.c_str(), "CVar Dumper", MB_ICONINFORMATION);
+    std::string msg = "SUCCESS!\nDumped " + std::to_string(count) + " cvars to your Desktop:\n\n" + dumpPath;
+    MessageBoxA(NULL, msg.c_str(), "CVar Dumper", MB_ICONINFORMATION);
 
     return 0;
 }
-
-// ============================================================================
-// DllMain
-// ============================================================================
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
