@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shlobj.h>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -6,11 +7,11 @@
 #include <cstdint>
 #include <cstring>
 
-// ============================================================================
-// Source Engine Command / ConVar Layout
-// ============================================================================
-
 typedef void* (*CreateInterfaceFn)(const char *pName, int *pReturnCode);
+
+// ============================================================================
+// Source Engine CVar Structures
+// ============================================================================
 
 class ConCommandBase {
 public:
@@ -67,7 +68,7 @@ public:
     virtual bool IsSingleton() = 0;
 };
 
-// VEngineCvar004 (Half-Life 2 / Source 2004-2013)
+// VEngineCvar004 (Half-Life 2 classic / Source 2004-2013)
 class ICvar004 : public IAppSystem {
 public:
     virtual void RegisterConCommandBase(ConCommandBase *variable) = 0;
@@ -77,7 +78,7 @@ public:
     virtual ConCommandBase *GetCommands(void) = 0;
 };
 
-// VEngineCvar007 (Portal 2 / CS:GO / Modern Source)
+// VEngineCvar007 (HL2 20th Anniversary / Portal 2 / CS:GO / Modern Source)
 class ICvarIteratorInternal {
 public:
     virtual void SetFirst() = 0;
@@ -224,7 +225,6 @@ static void FormatAndWriteCvar(std::ofstream &file, ConCommandBase *cmd) {
     file << "\n  }";
 }
 
-// Exception-protected entry writer to prevent any bad cvar pointer from crashing the game
 static bool SafeDumpEntry(std::ofstream &file, ConCommandBase *cmd) {
     __try {
         if (!cmd || !cmd->m_pszName) return false;
@@ -236,22 +236,27 @@ static bool SafeDumpEntry(std::ofstream &file, ConCommandBase *cmd) {
 }
 
 // ============================================================================
-// Core Execution Logic
+// Worker Thread
 // ============================================================================
 
-static bool RunDumper() {
-    static bool s_AlreadyRan = false;
-    if (s_AlreadyRan) return true;
-    s_AlreadyRan = true;
+static DWORD WINAPI DumperThread(LPVOID hModule) {
+    // Wait briefly for all game modules to stabilize
+    Sleep(500);
 
     HMODULE hVstdlib = GetModuleHandleA("vstdlib.dll");
     if (!hVstdlib) hVstdlib = LoadLibraryA("vstdlib.dll");
-    if (!hVstdlib) return false;
+    if (!hVstdlib) {
+        MessageBoxA(NULL, "Could not locate vstdlib.dll!", "Error", MB_ICONERROR);
+        return 0;
+    }
 
     auto vstdlibFactory = reinterpret_cast<CreateInterfaceFn>(GetProcAddress(hVstdlib, "CreateInterface"));
-    if (!vstdlibFactory) return false;
+    if (!vstdlibFactory) {
+        MessageBoxA(NULL, "Could not find CreateInterface in vstdlib.dll!", "Error", MB_ICONERROR);
+        return 0;
+    }
 
-    // Check for VEngineCvar007 (Portal 2 / CS:GO) vs VEngineCvar004 (Half-Life 2)
+    // Try VEngineCvar007 first, then VEngineCvar004
     void *cvarInterface = vstdlibFactory("VEngineCvar007", nullptr);
     bool is007 = (cvarInterface != nullptr);
 
@@ -263,36 +268,38 @@ static bool RunDumper() {
     }
 
     if (!cvarInterface) {
-        MessageBoxA(NULL, "Failed to locate ICvar interface in vstdlib.dll!", "CVar Dumper", MB_ICONERROR | MB_OK);
-        return false;
+        MessageBoxA(NULL, "Failed to get ICvar interface from vstdlib.dll!", "Error", MB_ICONERROR);
+        return 0;
     }
 
-    // Determine output file path
+    // Save to the Desktop so we never run into permissions/read-only issues
     char dumpPath[MAX_PATH] = {0};
-    GetModuleFileNameA(NULL, dumpPath, MAX_PATH);
-    char *lastSlash = strrchr(dumpPath, '\\');
-    if (lastSlash) {
-        *(lastSlash + 1) = '\0';
-        strcat_s(dumpPath, MAX_PATH, "cvars_dump.json");
+    if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, dumpPath))) {
+        strcat_s(dumpPath, MAX_PATH, "\\cvars_dump.json");
     } else {
-        strcpy_s(dumpPath, MAX_PATH, "cvars_dump.json");
+        strcpy_s(dumpPath, MAX_PATH, "C:\\cvars_dump.json");
     }
 
     std::ofstream outFile(dumpPath, std::ios::out | std::ios::trunc);
     if (!outFile.is_open()) {
         char err[512];
-        snprintf(err, sizeof(err), "Could not open destination file:\n%s", dumpPath);
-        MessageBoxA(NULL, err, "CVar Dumper", MB_ICONERROR | MB_OK);
-        return false;
+        snprintf(err, sizeof(err), "Could not open file for writing at:\n%s", dumpPath);
+        MessageBoxA(NULL, err, "Error", MB_ICONERROR);
+        return 0;
     }
 
     outFile << "[\n";
     int count = 0;
 
     if (is007) {
-        // Modern Source: Use Iterator
         auto cvar007 = reinterpret_cast<ICvar007 *>(cvarInterface);
-        ICvarIteratorInternal *iter = cvar007->FactoryInternalIterator();
+        ICvarIteratorInternal *iter = nullptr;
+        __try {
+            iter = cvar007->FactoryInternalIterator();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            iter = nullptr;
+        }
+
         if (iter) {
             for (iter->SetFirst(); iter->IsValid(); iter->Next()) {
                 ConCommandBase *cmd = iter->Get();
@@ -304,9 +311,14 @@ static bool RunDumper() {
             }
         }
     } else {
-        // Half-Life 2 (VEngineCvar004): Use linked list head
         auto cvar004 = reinterpret_cast<ICvar004 *>(cvarInterface);
-        ConCommandBase *head = cvar004->GetCommands();
+        ConCommandBase *head = nullptr;
+        __try {
+            head = cvar004->GetCommands();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            head = nullptr;
+        }
+
         for (ConCommandBase *cmd = head; cmd != nullptr; cmd = cmd->m_pNext) {
             if (count > 0) outFile << ",\n";
             if (SafeDumpEntry(outFile, cmd)) {
@@ -319,90 +331,20 @@ static bool RunDumper() {
     outFile.close();
 
     char successMsg[1024];
-    snprintf(successMsg, sizeof(successMsg), "SUCCESS! Dumped %d cvars to:\n\n%s", count, dumpPath);
+    snprintf(successMsg, sizeof(successMsg), "SUCCESS!\nDumped %d cvars directly to your Desktop:\n\n%s", count, dumpPath);
     MessageBoxA(NULL, successMsg, "CVar Dumper", MB_ICONINFORMATION | MB_OK);
 
-    return true;
+    return 0;
 }
 
 // ============================================================================
-// Complete IServerPluginCallbacks Implementation
+// DllMain (Fires the moment Cheat Engine injects it)
 // ============================================================================
 
-class IServerPluginCallbacks {
-public:
-    virtual bool            Load(CreateInterfaceFn interfaceFactory, CreateInterfaceFn gameServerFactory) = 0;
-    virtual void            Unload() = 0;
-    virtual void            Pause() = 0;
-    virtual void            UnPause() = 0;
-    virtual const char     *GetPluginDescription() = 0;
-    virtual void            LevelInit(char const *pMapName) = 0;
-    virtual void            ServerActivate(void *pEdictList, int edictCount, int clientMax) = 0;
-    virtual void            GameFrame(bool simulating) = 0;
-    virtual void            LevelShutdown() = 0;
-    virtual void            ClientActive(void *pEntity) = 0;
-    virtual void            ClientDisconnect(void *pEntity) = 0;
-    virtual void            ClientPutInServer(void *pEntity, char const *playername) = 0;
-    virtual void            SetCommandClient(int index) = 0;
-    virtual void            ClientSettingsChanged(void *pEdict) = 0;
-    virtual int             ClientConnect(bool *bAllowConnect, void *pEntity, const char *pszName, const char *pszAddress, char *reject, int maxrejectlen) = 0;
-    virtual int             ClientCommand(void *pEntity, const void *args) = 0;
-    virtual int             NetworkIDValidated(const char *pszUserName, const char *pszNetworkID) = 0;
-    virtual void            OnQueryCvarValueFinished(int iCookie, void *pPlayerEntity, int eStatus, const char *pCvarName, const char *pCvarValue) = 0;
-    virtual void            OnEdictAllocated(void *pEdict) = 0;
-    virtual void            OnEdictFreed(const void *pEdict) = 0;
-};
-
-class CVarDumperPlugin : public IServerPluginCallbacks {
-public:
-    virtual bool Load(CreateInterfaceFn, CreateInterfaceFn) override {
-        // Runs cleanly when HL2 loads the .vdf
-        RunDumper();
-        return true;
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
+    if (fdwReason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hinstDLL);
+        CreateThread(NULL, 0, DumperThread, hinstDLL, 0, NULL);
     }
-
-    virtual void Unload() override {}
-    virtual void Pause() override {}
-    virtual void UnPause() override {}
-    virtual const char *GetPluginDescription() override { return "CVar Dumper"; }
-    virtual void LevelInit(char const *pMapName) override {}
-    virtual void ServerActivate(void *pEdictList, int edictCount, int clientMax) override {}
-    virtual void GameFrame(bool simulating) override {}
-    virtual void LevelShutdown() override {}
-    virtual void ClientActive(void *pEntity) override {}
-    virtual void ClientDisconnect(void *pEntity) override {}
-    virtual void ClientPutInServer(void *pEntity, char const *playername) override {}
-    virtual void SetCommandClient(int index) override {}
-    virtual void ClientSettingsChanged(void *pEdict) override {}
-    virtual int  ClientConnect(bool *bAllowConnect, void *pEntity, const char *pszName, const char *pszAddress, char *reject, int maxrejectlen) override { return 0; }
-    virtual int  ClientCommand(void *pEntity, const void *args) override { return 0; }
-    virtual int  NetworkIDValidated(const char *pszUserName, const char *pszNetworkID) override { return 0; }
-    virtual void OnQueryCvarValueFinished(int iCookie, void *pPlayerEntity, int eStatus, const char *pCvarName, const char *pCvarValue) override {}
-    virtual void OnEdictAllocated(void *pEdict) override {}
-    virtual void OnEdictFreed(const void *pEdict) override {}
-};
-
-static CVarDumperPlugin g_Plugin;
-
-// ============================================================================
-// Exports
-// ============================================================================
-
-#if defined(_WIN32)
-#define PLUGIN_EXPORT extern "C" __declspec(dllexport)
-#else
-#define PLUGIN_EXPORT extern "C" __attribute__((visibility("default")))
-#endif
-
-PLUGIN_EXPORT void *CreateInterface(const char *pName, int *pReturnCode) {
-    if (pName && strstr(pName, "ISERVERPLUGINCALLBACKS")) {
-        if (pReturnCode) *pReturnCode = 0;
-        return &g_Plugin;
-    }
-    if (pReturnCode) *pReturnCode = 1;
-    return nullptr;
-}
-
-BOOL WINAPI DllMain(HINSTANCE, DWORD fdwReason, LPVOID) {
     return TRUE;
 }
