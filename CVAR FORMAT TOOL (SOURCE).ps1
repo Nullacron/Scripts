@@ -1,3 +1,8 @@
+if ([string]::IsNullOrWhiteSpace($Directory)) {
+    $Directory = (Get-Location).Path
+}
+
+# Compile high-performance C# item container & native comparer (Zero PowerShell ScriptBlock overhead)
 if (-not ('SourceEngineCvarComparer' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
