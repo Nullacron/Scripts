@@ -1,65 +1,98 @@
 (() => {
-  // Clean up any old instances or duplicate panels
+  // Clean up any old instances
   if (window.__stimSuite) window.__stimSuite.destroy();
   document.querySelectorAll('#stim-control-suite, #stim-panel, #stim-toggle-btn').forEach(el => el.remove());
 
-  // --- COMPLETE STATE (ALL START DISABLED AT EXECUTION) ---
+  // --- STATE INITIALIZATION (ALL FEATURES START DISABLED) ---
   const state = {
     master: false,
     activeTab: 'auto',
 
-    // Delays in milliseconds
+    // Global Speeds (in ms)
     clickDelay: 15,
     minigameDelay: 40,
     marketDelay: 250,
     mailDelay: 400,
 
-    // Automation switches (all disabled initially)
+    // Clicker & Upgrade Settings
+    clicker: {
+      burstMultiplier: 1,     // Clicks per tick (1 - 25)
+      useJitter: false,       // Randomize click timing slightly
+      autoCollectLevel: false // Auto click level rewards (.collect)
+    },
+    upgrades: {
+      reserveStim: 0,         // Don't spend on upgrades if balance is below this
+      allowOceanReset: false  // Allow final "Go to the ocean" ending
+    },
+
+    // Feature Toggles (Automation)
     features: {
       mainBtn: false,
       upgrades: false,
-      allowOceanReset: false,
-      press: false,
+      pressBtn: false,        // Start press
+      pressCollect: false,    // Collect press
       lootBoxes: false,
-      chickenEggs: false,
+      chickenFeed: false,     // Feed Paul
+      kinderEggs: false,      // Crack eggs
       duolingo: false,
       powerups: false,
       tradeMarket: false,
       mailInbox: false,
     },
 
-    // Granular Mute Controls (all disabled initially)
-    mute: {
-      lofi: false,          // Lo-Fi hip hop track
-      asmr: false,          // Soap, slime, kinetic sand, whispering
-      podcast: false,       // True crime podcast
-      videos: false,        // Subway Surfers, Mukbang (audio only; video keeps playing)
-      ocean: false,         // Ambient ocean waves
-      mainBtn: false,       // Main button rapid pops/clicks
-      press: false,         // Hydraulic press crunch
-      lootBoxes: false,     // Lootbox chime
-      chickenEggs: false,   // Egg crack & chicken clucks
-      duolingo: false,      // Duolingo dings
-      upgrades: false,      // Upgrade purchase & level-up chimes
-      tradeMarket: false,   // Stock market trade chimes
-      mailInbox: false,     // Email alerts
-      allOther: false       // Any other miscellaneous SFX
+    // Stock Market Engine
+    market: {
+      cycleAll: true,         // Automatically rotate through every market stock
+      smartRange: false,      // Auto buy in dip % and sell in peak %
+      smartBuyPct: 25,        // Buy when price is in bottom 25% of seen range
+      smartSellPct: 25,       // Sell when price is in top 25% of seen range
+      batchBuyCount: 1,       // How many shares/buys to execute per tick
+      sellAllShares: true,    // Sell entire holding when sell signal hits
+      selectedStockUI: 'Tesla',
+      // Dynamic per-stock database
+      stocks: {
+        'Tesla': { enabled: true, buy: 380, sell: 540, minSeen: Infinity, maxSeen: -Infinity, lastSeen: 0 },
+        'Bitcoin': { enabled: true, buy: 18000, sell: 26000, minSeen: Infinity, maxSeen: -Infinity, lastSeen: 0 }
+      }
     },
 
-    marketLimits: {
-      Tesla: { buy: 380, sell: 540 },
-      Bitcoin: { buy: 18000, sell: 26000 }
-    }
+    // Mail Inbox Settings
+    mail: {
+      autoSurvey: false,
+      autoActions: false,
+      trapsBlacklist: "Thank them, Donate, Send money, Wire, Transfer"
+    },
+
+    // Audio Silencer States (Mute Hub)
+    mute: {
+      lofi: false,
+      asmr: false,
+      podcast: false,
+      videos: false,
+      ocean: false,
+      mainBtn: false,
+      press: false,
+      lootBoxes: false,
+      chickenEggs: false,
+      duolingo: false,
+      upgrades: false,
+      tradeMarket: false,
+      mailInbox: false,
+      allOther: false
+    },
+
+    panelOpacity: 96
   };
 
-  const mailTraps = [
-    "Thank them for the opportunity",
-    "Donate 2,000 stimulation",
-    "Send money",
-    "Wire transfer"
-  ];
+  // Helper to read stimulation points
+  function getStimulationBalance() {
+    const el = document.querySelector('.amount, .counter, .points, .sps-counter');
+    if (!el) return Infinity;
+    const val = parseFloat(el.innerText.replace(/[^0-9.]/g, ''));
+    return isNaN(val) ? Infinity : val;
+  }
 
-  // --- AUDIO INTERCEPTION & CLASSIFICATION ---
+  // --- AUDIO INTERCEPTION ENGINE ---
   let activeClickCategory = null;
 
   function categorizeAudio(mediaEl, clickContext) {
@@ -101,7 +134,6 @@
     return originalBufferStart.apply(this, arguments);
   };
 
-  // Continuous background audio muter (preserves visual video playback)
   const audioEnforcerTimer = setInterval(() => {
     document.querySelectorAll('audio, video').forEach(media => {
       const category = categorizeAudio(media, null);
@@ -134,52 +166,65 @@
     stopLoops();
     if (!state.master) return;
 
-    // 1. Main Button Loop
-    clickTimer = setInterval(() => {
-      if (!state.features.mainBtn) return;
-      const btn = document.querySelector('.main-btn');
-      if (btn) clickWithCategory(btn, 'mainBtn');
-      const col = document.querySelector('.collect');
-      if (col) clickWithCategory(col, 'upgrades');
-    }, Math.max(5, state.clickDelay));
+    // 1. Main Button Loop with Burst & Jitter
+    const runMainClick = () => {
+      if (state.master && state.features.mainBtn) {
+        const btn = document.querySelector('.main-btn');
+        if (btn) {
+          for (let i = 0; i < state.clicker.burstMultiplier; i++) {
+            clickWithCategory(btn, 'mainBtn');
+          }
+        }
+        if (state.clicker.autoCollectLevel) {
+          const col = document.querySelector('.collect');
+          if (col) clickWithCategory(col, 'upgrades');
+        }
+      }
+      const jitter = state.clicker.useJitter ? (Math.random() * 0.4 + 0.8) : 1;
+      const nextDelay = Math.max(5, Math.round(state.clickDelay * jitter));
+      clickTimer = setTimeout(runMainClick, nextDelay);
+    };
+    runMainClick();
 
     // 2. Minigame & Upgrade Loop
     minigameTimer = setInterval(() => {
-      if (state.features.press) {
-        const pCol = document.querySelector('.press-collect');
-        if (pCol) clickWithCategory(pCol, 'press');
+      if (state.features.pressBtn) {
         const pBtn = document.querySelector('.press-btn');
         if (pBtn) clickWithCategory(pBtn, 'press');
       }
-
+      if (state.features.pressCollect) {
+        const pCol = document.querySelector('.press-collect');
+        if (pCol) clickWithCategory(pCol, 'press');
+      }
       if (state.features.lootBoxes) {
         document.querySelectorAll('.loot-box-target').forEach(el => clickWithCategory(el, 'lootBoxes'));
       }
-
-      if (state.features.chickenEggs) {
+      if (state.features.chickenFeed) {
         const feed = document.querySelector('.action-btn');
         if (feed) clickWithCategory(feed, 'chickenEggs');
+      }
+      if (state.features.kinderEggs) {
         document.querySelectorAll('.egg').forEach(el => clickWithCategory(el, 'chickenEggs'));
       }
-
       if (state.features.duolingo) {
         const choice = document.querySelector('.question-choice');
         if (choice) clickWithCategory(choice, 'duolingo');
       }
-
       if (state.features.powerups) {
         document.querySelectorAll('img.powerup').forEach(p => p.click());
       }
-
       if (state.features.upgrades) {
-        const selector = state.features.allowOceanReset
-          ? '.upgrade:not(.upgrade-disabled) .upgrade-icon'
-          : '.upgrade:not(.upgrade-disabled) .upgrade-icon:not([src*="ocean"])';
-        document.querySelectorAll(selector).forEach(u => clickWithCategory(u, 'upgrades'));
+        if (getStimulationBalance() >= state.upgrades.reserveStim) {
+          const selector = state.upgrades.allowOceanReset
+            ? '.upgrade:not(.upgrade-disabled) .upgrade-icon'
+            : '.upgrade:not(.upgrade-disabled) .upgrade-icon:not([src*="ocean"])';
+          document.querySelectorAll(selector).forEach(u => clickWithCategory(u, 'upgrades'));
+        }
       }
     }, Math.max(10, state.minigameDelay));
 
-    // 3. Trade Market Loop
+    // 3. Multi-Stock Market Rotation Loop
+    let stockCycleIndex = 0;
     marketTimer = setInterval(() => {
       if (!state.features.tradeMarket) return;
       const select = document.querySelector('.stock-select');
@@ -190,17 +235,71 @@
 
       if (!select || !priceEl || !buyBtn || !sellBtn) return;
 
-      const currentStock = select.value || "Tesla";
-      const limits = state.marketLimits[currentStock] || { buy: 350, sell: 500 };
+      // Scan and register all newly unlocked stocks in the select element
+      const availableOptions = Array.from(select.options).map(o => o.value || o.text).filter(Boolean);
+      availableOptions.forEach(stockName => {
+        if (!state.market.stocks[stockName]) {
+          state.market.stocks[stockName] = {
+            enabled: true,
+            buy: 0,
+            sell: 0,
+            minSeen: Infinity,
+            maxSeen: -Infinity,
+            lastSeen: 0
+          };
+          updateMarketStockPickerUI();
+        }
+      });
+
+      // If cycleAll is enabled, rotate to next stock
+      if (state.market.cycleAll && availableOptions.length > 0) {
+        stockCycleIndex = (stockCycleIndex + 1) % availableOptions.length;
+        const nextStock = availableOptions[stockCycleIndex];
+        if (select.value !== nextStock) {
+          select.value = nextStock;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+
+      const activeStock = select.value;
+      const cfg = state.market.stocks[activeStock];
+      if (!cfg || !cfg.enabled) return;
+
       const price = parseFloat(priceEl.innerText.replace(/[^0-9.]/g, ''));
       const shares = countEl ? parseInt(countEl.innerText.replace(/[^0-9]/g, '') || "0", 10) : 0;
+      if (isNaN(price) || price <= 0) return;
 
-      if (isNaN(price)) return;
+      // Track prices
+      cfg.lastSeen = price;
+      if (price < cfg.minSeen) cfg.minSeen = price;
+      if (price > cfg.maxSeen) cfg.maxSeen = price;
 
-      if (price <= limits.buy && !buyBtn.disabled) {
-        clickWithCategory(buyBtn, 'tradeMarket');
-      } else if (price >= limits.sell && shares > 0 && !sellBtn.disabled) {
-        clickWithCategory(sellBtn, 'tradeMarket');
+      // Determine buy and sell thresholds
+      let targetBuy = cfg.buy;
+      let targetSell = cfg.sell;
+
+      if (state.market.smartRange && cfg.minSeen < cfg.maxSeen) {
+        const spread = cfg.maxSeen - cfg.minSeen;
+        targetBuy = cfg.minSeen + spread * (state.market.smartBuyPct / 100);
+        targetSell = cfg.maxSeen - spread * (state.market.smartSellPct / 100);
+      }
+
+      // Execute Trades
+      if (targetBuy > 0 && price <= targetBuy && !buyBtn.disabled) {
+        for (let i = 0; i < state.market.batchBuyCount; i++) {
+          clickWithCategory(buyBtn, 'tradeMarket');
+        }
+      } else if (targetSell > 0 && price >= targetSell && shares > 0 && !sellBtn.disabled) {
+        const toSell = state.market.sellAllShares ? shares : 1;
+        for (let i = 0; i < toSell; i++) {
+          clickWithCategory(sellBtn, 'tradeMarket');
+        }
+      }
+
+      // Live update preview if currently viewing this stock in UI
+      if (state.market.selectedStockUI === activeStock) {
+        renderStockUIData();
       }
     }, Math.max(50, state.marketDelay));
 
@@ -210,13 +309,18 @@
       const notif = document.querySelector('.notification');
       if (notif && notif.offsetParent !== null) clickWithCategory(notif, 'mailInbox');
 
-      document.querySelectorAll('.question-container input').forEach(input => input.click());
+      if (state.mail.autoSurvey) {
+        document.querySelectorAll('.question-container input').forEach(input => input.click());
+      }
 
-      const actionBtn = document.querySelector('.mail-container .action, .modal .action');
-      if (actionBtn && actionBtn.offsetParent !== null) {
-        const text = (actionBtn.innerText || "").trim().toLowerCase();
-        const isTrap = mailTraps.some(trap => text.includes(trap.toLowerCase()));
-        if (!isTrap) clickWithCategory(actionBtn, 'mailInbox');
+      if (state.mail.autoActions) {
+        const actionBtn = document.querySelector('.mail-container .action, .modal .action');
+        if (actionBtn && actionBtn.offsetParent !== null) {
+          const text = (actionBtn.innerText || "").trim().toLowerCase();
+          const traps = state.mail.trapsBlacklist.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+          const isTrap = traps.some(trap => text.includes(trap));
+          if (!isTrap) clickWithCategory(actionBtn, 'mailInbox');
+        }
       }
 
       const closeBtn = document.querySelector('.mail-container .close, .modal .close');
@@ -225,7 +329,7 @@
   }
 
   function stopLoops() {
-    clearInterval(clickTimer);
+    clearTimeout(clickTimer);
     clearInterval(minigameTimer);
     clearInterval(marketTimer);
     clearInterval(mailTimer);
@@ -239,10 +343,10 @@
     top: 60px !important;
     right: 20px !important;
     z-index: 2147483647 !important;
-    width: 280px !important;
-    max-height: 85vh !important;
+    width: 320px !important;
+    max-height: 88vh !important;
     overflow-y: auto !important;
-    background: #0f172a !important;
+    background: rgba(15, 23, 42, 0.96) !important;
     color: #f8fafc !important;
     border: 2px solid #38bdf8 !important;
     border-radius: 12px !important;
@@ -256,113 +360,182 @@
   `;
 
   panel.innerHTML = `
-    <!-- DRAGGABLE TITLE BAR -->
-    <div id="cfg-drag-handle" style="cursor: move; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 4px 6px; background: #1e293b; border-radius: 6px; border: 1px dashed #475569;">
-      <span style="font-weight: 800; font-size: 12px; color: #38bdf8;">✥ Drag to Move</span>
+    <!-- DRAG HEADER -->
+    <div id="cfg-drag-handle" style="cursor: move; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 4px 8px; background: #1e293b; border-radius: 6px; border: 1px dashed #475569;">
+      <span style="font-weight: 800; font-size: 12px; color: #38bdf8;">✥ Drag to Move Panel</span>
       <button id="cfg-min" style="background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 14px; font-weight: bold;">—</button>
     </div>
 
-    <!-- MASTER SWITCH (INITIALIZED OFF) -->
+    <!-- MASTER BUTTON (STARTS PAUSED) -->
     <button id="cfg-master" style="width: 100%; padding: 8px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; background: #ef4444; color: #ffffff; font-size: 12px; margin-bottom: 8px;">
       MASTER: PAUSED (\`)
     </button>
 
-    <!-- TABS -->
-    <div style="display: flex; gap: 6px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 6px;">
-      <button id="tab-btn-auto" style="flex: 1; padding: 6px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #38bdf8; color: #0f172a; font-size: 11px;">
-        ⚡ Automation
-      </button>
-      <button id="tab-btn-mute" style="flex: 1; padding: 6px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #1e293b; color: #94a3b8; font-size: 11px;">
-        🔇 Mute Hub
-      </button>
+    <!-- 4 TABS -->
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 10px; border-bottom: 1px solid #334155; padding-bottom: 6px;">
+      <button id="tab-btn-auto" style="padding: 5px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #38bdf8; color: #0f172a; font-size: 10px;">⚡ Clicks</button>
+      <button id="tab-btn-market" style="padding: 5px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #1e293b; color: #94a3b8; font-size: 10px;">📈 Market</button>
+      <button id="tab-btn-mail" style="padding: 5px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #1e293b; color: #94a3b8; font-size: 10px;">✉️ Mail/Up</button>
+      <button id="tab-btn-mute" style="padding: 5px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; background: #1e293b; color: #94a3b8; font-size: 10px;">🔇 Audio</button>
     </div>
 
-    <!-- CONTENT BODY -->
-    <div id="cfg-body">
-      <!-- TAB 1: AUTOMATION -->
-      <div id="view-auto">
-        <div style="font-weight: bold; color: #f59e0b; margin: 4px 0 3px;">⚡ Speed Settings</div>
+    <!-- TAB 1: CLICKS & MINIGAMES -->
+    <div id="view-auto">
+      <div style="font-weight: bold; color: #f59e0b; margin-bottom: 4px;">⚡ Main Clicker Settings</div>
+      <label style="display: block; margin-bottom: 4px;">
+        Click Interval: <b id="lbl-click">${state.clickDelay}ms</b>
+        <input type="range" id="rng-click" min="5" max="100" step="5" value="${state.clickDelay}" style="width: 100%;">
+      </label>
+      <label style="display: block; margin-bottom: 4px;">
+        Burst Clicks/Tick: <b id="lbl-burst">${state.clicker.burstMultiplier}x</b>
+        <input type="range" id="rng-burst" min="1" max="25" step="1" value="${state.clicker.burstMultiplier}" style="width: 100%;">
+      </label>
+      <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+        <label><input type="checkbox" id="chk-jitter"> Timing Jitter</label>
+        <label><input type="checkbox" id="chk-autoCollectLevel"> Auto Level Collect</label>
+      </div>
+
+      <div style="font-weight: bold; color: #f59e0b; margin: 8px 0 4px;">🎮 Minigame Toggles</div>
+      <label style="display: block; margin-bottom: 4px;">
+        Minigames Delay: <b id="lbl-mini">${state.minigameDelay}ms</b>
+        <input type="range" id="rng-mini" min="15" max="300" step="15" value="${state.minigameDelay}" style="width: 100%;">
+      </label>
+      <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+        <span>Select Minigames:</span>
+        <div>
+          <button id="btn-feat-all" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 5px; cursor: pointer; font-size: 10px;">All</button>
+          <button id="btn-feat-none" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 5px; cursor: pointer; font-size: 10px;">None</button>
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <label><input type="checkbox" id="chk-mainBtn"> Main Button Auto-Clicker</label>
+        <label><input type="checkbox" id="chk-pressBtn"> Hydraulic Press (Auto-Start)</label>
+        <label><input type="checkbox" id="chk-pressCollect"> Hydraulic Press (Auto-Collect)</label>
+        <label><input type="checkbox" id="chk-lootBoxes"> Floating Loot Boxes</label>
+        <label><input type="checkbox" id="chk-chickenFeed"> Feed Paul the Chicken</label>
+        <label><input type="checkbox" id="chk-kinderEggs"> Crack Kinder Eggs</label>
+        <label><input type="checkbox" id="chk-duolingo"> Duolingo Answers</label>
+        <label><input type="checkbox" id="chk-powerups"> Floating Powerups</label>
+      </div>
+    </div>
+
+    <!-- TAB 2: COMPLETE MARKET REWORK -->
+    <div id="view-market" style="display: none;">
+      <div style="font-weight: bold; color: #f59e0b; margin-bottom: 4px;">📈 Multi-Stock Trading Engine</div>
+      <label style="display: block; margin-bottom: 4px;">
+        Market Eval Tick: <b id="lbl-market">${state.marketDelay}ms</b>
+        <input type="range" id="rng-market" min="50" max="1000" step="25" value="${state.marketDelay}" style="width: 100%;">
+      </label>
+      <label style="display: block; margin-bottom: 4px;">
+        Batch Buy Amount: <b id="lbl-batch">${state.market.batchBuyCount}x per tick</b>
+        <input type="range" id="rng-batch" min="1" max="10" step="1" value="${state.market.batchBuyCount}" style="width: 100%;">
+      </label>
+
+      <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; background: #020617; padding: 6px; border-radius: 6px; border: 1px solid #1e293b;">
+        <label><input type="checkbox" id="chk-market-cycle" checked> 🔄 <b>Cycle All Stocks</b> (Continuously trade every market)</label>
+        <label><input type="checkbox" id="chk-market-sellall" checked> 💰 Sell Entire Position on Profit Target</label>
+        <label><input type="checkbox" id="chk-market-smart"> 🧠 <b>Smart Range Mode</b> (Auto buy dip / sell peak %)</label>
+      </div>
+
+      <div id="smart-range-controls" style="display: none; margin-bottom: 8px; background: #1e293b; padding: 6px; border-radius: 6px;">
         <label style="display: block; margin-bottom: 4px;">
-          Click Delay: <b id="lbl-click">${state.clickDelay}ms</b>
-          <input type="range" id="rng-click" min="5" max="100" step="5" value="${state.clickDelay}" style="width: 100%;">
+          Buy in Lowest: <b id="lbl-smart-buy">${state.market.smartBuyPct}%</b> of range
+          <input type="range" id="rng-smart-buy" min="5" max="45" step="5" value="${state.market.smartBuyPct}" style="width: 100%;">
         </label>
-        <label style="display: block; margin-bottom: 4px;">
-          Minigames Delay: <b id="lbl-mini">${state.minigameDelay}ms</b>
-          <input type="range" id="rng-mini" min="15" max="300" step="15" value="${state.minigameDelay}" style="width: 100%;">
+        <label style="display: block;">
+          Sell in Highest: <b id="lbl-smart-sell">${state.market.smartSellPct}%</b> of range
+          <input type="range" id="rng-smart-sell" min="5" max="45" step="5" value="${state.market.smartSellPct}" style="width: 100%;">
         </label>
-        <label style="display: block; margin-bottom: 6px;">
-          Market Tick: <b id="lbl-market">${state.marketDelay}ms</b>
-          <input type="range" id="rng-market" min="100" max="1000" step="50" value="${state.marketDelay}" style="width: 100%;">
-        </label>
+      </div>
 
-        <div style="font-weight: bold; color: #f59e0b; margin: 8px 0 4px;">📈 Market Thresholds</div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 4px;">
-          <label>TSLA Buy ≤<input type="number" id="inp-tsla-buy" value="${state.marketLimits.Tesla.buy}" style="width: 85%; background: #020617; border: 1px solid #334155; color: #fff; padding: 2px;"></label>
-          <label>TSLA Sell ≥<input type="number" id="inp-tsla-sell" value="${state.marketLimits.Tesla.sell}" style="width: 85%; background: #020617; border: 1px solid #334155; color: #fff; padding: 2px;"></label>
-        </div>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 6px;">
-          <label>BTC Buy ≤<input type="number" id="inp-btc-buy" value="${state.marketLimits.Bitcoin.buy}" style="width: 85%; background: #020617; border: 1px solid #334155; color: #fff; padding: 2px;"></label>
-          <label>BTC Sell ≥<input type="number" id="inp-btc-sell" value="${state.marketLimits.Bitcoin.sell}" style="width: 85%; background: #020617; border: 1px solid #334155; color: #fff; padding: 2px;"></label>
-        </div>
+      <!-- DYNAMIC PER-STOCK CONFIG -->
+      <div style="font-weight: bold; color: #38bdf8; margin: 6px 0 3px;">🎯 Configure Asset Target Prices</div>
+      <div style="display: flex; gap: 6px; align-items: center; margin-bottom: 6px;">
+        <span>Select Asset:</span>
+        <select id="ui-stock-picker" style="flex: 1; background: #0f172a; border: 1px solid #38bdf8; color: #fff; padding: 3px; border-radius: 4px;"></select>
+      </div>
 
-        <div style="display: flex; justify-content: space-between; align-items: center; margin: 8px 0 4px;">
-          <span style="font-weight: bold; color: #f59e0b;">🎛️ Clicker Toggles</span>
-          <div>
-            <button id="btn-feat-all" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 5px; cursor: pointer; font-size: 10px;">All</button>
-            <button id="btn-feat-none" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 5px; cursor: pointer; font-size: 10px;">None</button>
-          </div>
+      <div id="stock-data-box" style="background: #020617; padding: 8px; border-radius: 6px; border: 1px solid #334155;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+          <label><input type="checkbox" id="chk-stock-enable" checked> Trade this stock</label>
+          <span id="txt-last-price" style="color: #38bdf8; font-weight: bold;">Last: $0</span>
         </div>
+        <div style="color: #94a3b8; font-size: 10px; margin-bottom: 6px;">
+          Observed Range: <span id="txt-range-low" style="color: #22c55e;">$0</span> - <span id="txt-range-high" style="color: #ef4444;">$0</span>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+          <label>Buy Below ≤<input type="number" id="inp-stock-buy" style="width: 90%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px;"></label>
+          <label>Sell Above ≥<input type="number" id="inp-stock-sell" style="width: 90%; background: #0f172a; border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px;"></label>
+        </div>
+      </div>
+      <label style="display: block; margin-top: 8px;"><input type="checkbox" id="chk-tradeMarket"> <b>Enable Market Bot Execution</b></label>
+    </div>
 
-        <div style="display: flex; flex-direction: column; gap: 4px;">
-          <label><input type="checkbox" id="chk-mainBtn"> Main Button</label>
-          <label><input type="checkbox" id="chk-upgrades"> Auto Upgrades</label>
-          <label style="color: #ef4444;"><input type="checkbox" id="chk-allowOceanReset"> Allow Ocean Ending (Reset)</label>
-          <label><input type="checkbox" id="chk-press"> Hydraulic Press</label>
-          <label><input type="checkbox" id="chk-lootBoxes"> Loot Boxes</label>
-          <label><input type="checkbox" id="chk-chickenEggs"> Chicken & Eggs</label>
-          <label><input type="checkbox" id="chk-duolingo"> Duolingo Answers</label>
-          <label><input type="checkbox" id="chk-powerups"> Powerups</label>
-          <label><input type="checkbox" id="chk-tradeMarket"> Trade Market Bot</label>
-          <label><input type="checkbox" id="chk-mailInbox"> Mail Inbox Bot</label>
+    <!-- TAB 3: MAIL & UPGRADES -->
+    <div id="view-mail" style="display: none;">
+      <div style="font-weight: bold; color: #f59e0b; margin-bottom: 4px;">🛒 Upgrade Manager</div>
+      <label style="display: block; margin-bottom: 4px;">
+        Balance Reserve Buffer (Do not spend below):
+        <input type="number" id="inp-reserve-stim" value="${state.upgrades.reserveStim}" style="width: 90%; background: #020617; border: 1px solid #334155; color: #fff; padding: 2px; border-radius: 3px;">
+      </label>
+      <label style="display: block; margin-bottom: 4px;"><input type="checkbox" id="chk-upgrades"> Auto-Buy Affordable Upgrades</label>
+      <label style="display: block; color: #ef4444; margin-bottom: 8px;"><input type="checkbox" id="chk-allowOceanReset"> Allow "Go to the Ocean" Ending (Reset)</label>
+
+      <div style="font-weight: bold; color: #f59e0b; margin: 8px 0 4px;">✉️ Mail Inbox Manager</div>
+      <label style="display: block; margin-bottom: 4px;">
+        Mail Scan Delay: <b id="lbl-mail">${state.mailDelay}ms</b>
+        <input type="range" id="rng-mail" min="100" max="1000" step="50" value="${state.mailDelay}" style="width: 100%;">
+      </label>
+      <label style="display: block; margin-bottom: 4px;"><input type="checkbox" id="chk-mail-survey"> Auto-Check Survey Choices</label>
+      <label style="display: block; margin-bottom: 4px;"><input type="checkbox" id="chk-mail-actions"> Auto-Click Safe Action Buttons (Grandma, etc.)</label>
+      <label style="display: block; margin-bottom: 4px;">
+        Trap Phrases Blacklist (comma-separated):
+        <input type="text" id="inp-mail-traps" value="${state.mail.trapsBlacklist}" style="width: 95%; background: #020617; border: 1px solid #334155; color: #fff; padding: 3px; font-size: 10px; border-radius: 3px;">
+      </label>
+      <label style="display: block; margin-top: 6px;"><input type="checkbox" id="chk-mailInbox"> <b>Enable Mail Bot Execution</b></label>
+
+      <hr style="border: 0; border-top: 1px solid #334155; margin: 8px 0;">
+      <div style="font-weight: bold; color: #38bdf8; margin-bottom: 4px;">🎨 Interface Preferences</div>
+      <label style="display: block;">
+        Panel Opacity: <b id="lbl-opacity">${state.panelOpacity}%</b>
+        <input type="range" id="rng-opacity" min="40" max="100" step="5" value="${state.panelOpacity}" style="width: 100%;">
+      </label>
+    </div>
+
+    <!-- TAB 4: MUTE HUB -->
+    <div id="view-mute" style="display: none;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <span style="font-weight: bold; color: #ef4444;">🔇 Audio Silencers</span>
+        <div>
+          <button id="btn-mute-all" style="background: #ef4444; color: #fff; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold;">Mute All</button>
+          <button id="btn-mute-none" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 10px;">Unmute All</button>
         </div>
       </div>
 
-      <!-- TAB 2: MUTE HUB -->
-      <div id="view-mute" style="display: none;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-          <span style="font-weight: bold; color: #ef4444;">🔇 Audio Silencers</span>
-          <div>
-            <button id="btn-mute-all" style="background: #ef4444; color: #fff; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 10px; font-weight: bold;">Mute All</button>
-            <button id="btn-mute-none" style="background: #334155; color: #fff; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer; font-size: 10px;">Unmute All</button>
-          </div>
-        </div>
+      <div style="font-weight: bold; color: #38bdf8; margin: 4px 0 2px;">🎧 Background Media</div>
+      <div style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px;">
+        <label><input type="checkbox" id="mute-lofi"> 🎵 Lo-Fi Beats</label>
+        <label><input type="checkbox" id="mute-asmr"> 🧼 ASMR (Soap, Sand, Slime)</label>
+        <label><input type="checkbox" id="mute-podcast"> 🎙️ True Crime Podcast</label>
+        <label><input type="checkbox" id="mute-videos"> 📱 Videos (Subway Surfers, Mukbang)</label>
+        <label><input type="checkbox" id="mute-ocean"> 🌊 Ambient Ocean Waves</label>
+      </div>
 
-        <div style="font-weight: bold; color: #38bdf8; margin: 6px 0 3px;">🎧 Background Media</div>
-        <div style="display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px;">
-          <label><input type="checkbox" id="mute-lofi"> 🎵 Lo-Fi Beats</label>
-          <label><input type="checkbox" id="mute-asmr"> 🧼 ASMR (Soap, Sand, Slime)</label>
-          <label><input type="checkbox" id="mute-podcast"> 🎙️ True Crime Podcast</label>
-          <label><input type="checkbox" id="mute-videos"> 📱 Videos (Subway Surfers, Mukbang)</label>
-          <label><input type="checkbox" id="mute-ocean"> 🌊 Ambient Ocean Waves</label>
-        </div>
-
-        <div style="font-weight: bold; color: #38bdf8; margin: 6px 0 3px;">🔊 Clickers & Game SFX</div>
-        <div style="display: flex; flex-direction: column; gap: 5px;">
-          <label><input type="checkbox" id="mute-mainBtn"> 🖱️ Main Button Rapid Clicks</label>
-          <label><input type="checkbox" id="mute-press"> 🏗️ Hydraulic Press Squash</label>
-          <label><input type="checkbox" id="mute-lootBoxes"> 📦 Loot Boxes Open Chimes</label>
-          <label><input type="checkbox" id="mute-chickenEggs"> 🥚 Eggs Crack & Chicken Feed</label>
-          <label><input type="checkbox" id="mute-duolingo"> 🦉 Duolingo Dings & Bells</label>
-          <label><input type="checkbox" id="mute-upgrades"> 🛒 Upgrade & Level Up Chimes</label>
-          <label><input type="checkbox" id="mute-tradeMarket"> 📈 Stock Buy/Sell Cash Sound</label>
-          <label><input type="checkbox" id="mute-mailInbox"> ✉️ Email Notification Alert</label>
-          <label><input type="checkbox" id="mute-allOther"> 🔔 All Other Uncategorized SFX</label>
-        </div>
+      <div style="font-weight: bold; color: #38bdf8; margin: 4px 0 2px;">🔊 Clickers & Game SFX</div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <label><input type="checkbox" id="mute-mainBtn"> 🖱️ Main Button Rapid Clicks</label>
+        <label><input type="checkbox" id="mute-press"> 🏗️ Hydraulic Press Squash</label>
+        <label><input type="checkbox" id="mute-lootBoxes"> 📦 Loot Boxes Open Chimes</label>
+        <label><input type="checkbox" id="mute-chickenEggs"> 🥚 Eggs Crack & Chicken Feed</label>
+        <label><input type="checkbox" id="mute-duolingo"> 🦉 Duolingo Dings & Bells</label>
+        <label><input type="checkbox" id="mute-upgrades"> 🛒 Upgrade & Level Up Chimes</label>
+        <label><input type="checkbox" id="mute-tradeMarket"> 📈 Stock Buy/Sell Cash Sound</label>
+        <label><input type="checkbox" id="mute-mailInbox"> ✉️ Email Notification Alert</label>
+        <label><input type="checkbox" id="mute-allOther"> 🔔 All Other SFX</label>
       </div>
     </div>
   `;
 
-  // Attach directly to documentElement to avoid any Vue virtual-DOM clearing
   (document.body || document.documentElement).appendChild(panel);
 
   // --- DRAGGING LOGIC ---
@@ -378,7 +551,7 @@
     const rect = panel.getBoundingClientRect();
     initialLeft = rect.left;
     initialTop = rect.top;
-    panel.style.right = 'auto'; // release fixed right anchor
+    panel.style.right = 'auto';
     panel.style.left = `${initialLeft}px`;
     panel.style.top = `${initialTop}px`;
     handle.style.background = '#0284c7';
@@ -403,33 +576,25 @@
     }
   });
 
-  // --- TAB TOGGLING ---
-  const tabBtnAuto = panel.querySelector('#tab-btn-auto');
-  const tabBtnMute = panel.querySelector('#tab-btn-mute');
-  const viewAuto = panel.querySelector('#view-auto');
-  const viewMute = panel.querySelector('#view-mute');
-
-  function setTab(tab) {
-    state.activeTab = tab;
-    if (tab === 'auto') {
-      viewAuto.style.display = 'block';
-      viewMute.style.display = 'none';
-      tabBtnAuto.style.background = '#38bdf8';
-      tabBtnAuto.style.color = '#0f172a';
-      tabBtnMute.style.background = '#1e293b';
-      tabBtnMute.style.color = '#94a3b8';
-    } else {
-      viewAuto.style.display = 'none';
-      viewMute.style.display = 'block';
-      tabBtnMute.style.background = '#38bdf8';
-      tabBtnMute.style.color = '#0f172a';
-      tabBtnAuto.style.background = '#1e293b';
-      tabBtnAuto.style.color = '#94a3b8';
-    }
+  // --- TAB NAVIGATION ---
+  const tabs = ['auto', 'market', 'mail', 'mute'];
+  function setTab(tabName) {
+    state.activeTab = tabName;
+    tabs.forEach(t => {
+      const btn = panel.querySelector(`#tab-btn-${t}`);
+      const view = panel.querySelector(`#view-${t}`);
+      if (t === tabName) {
+        btn.style.background = '#38bdf8';
+        btn.style.color = '#0f172a';
+        view.style.display = 'block';
+      } else {
+        btn.style.background = '#1e293b';
+        btn.style.color = '#94a3b8';
+        view.style.display = 'none';
+      }
+    });
   }
-
-  tabBtnAuto.addEventListener('click', () => setTab('auto'));
-  tabBtnMute.addEventListener('click', () => setTab('mute'));
+  tabs.forEach(t => panel.querySelector(`#tab-btn-${t}`).addEventListener('click', () => setTab(t)));
 
   // --- MASTER TOGGLE ---
   const masterBtn = panel.querySelector('#cfg-master');
@@ -441,14 +606,105 @@
   }
   masterBtn.addEventListener('click', toggleMaster);
 
-  // Sliders
+  // --- MARKET CONFIG UI HELPERS ---
+  const stockPicker = panel.querySelector('#ui-stock-picker');
+  const txtLast = panel.querySelector('#txt-last-price');
+  const txtLow = panel.querySelector('#txt-range-low');
+  const txtHigh = panel.querySelector('#txt-range-high');
+  const inpBuy = panel.querySelector('#inp-stock-buy');
+  const inpSell = panel.querySelector('#inp-stock-sell');
+  const chkStockEnable = panel.querySelector('#chk-stock-enable');
+
+  function updateMarketStockPickerUI() {
+    const current = stockPicker.value;
+    stockPicker.innerHTML = '';
+    Object.keys(state.market.stocks).forEach(st => {
+      const opt = document.createElement('option');
+      opt.value = st;
+      opt.textContent = st;
+      if (st === current) opt.selected = true;
+      stockPicker.appendChild(opt);
+    });
+    if (!stockPicker.value && Object.keys(state.market.stocks).length > 0) {
+      stockPicker.value = Object.keys(state.market.stocks)[0];
+    }
+    state.market.selectedStockUI = stockPicker.value;
+    renderStockUIData();
+  }
+
+  function renderStockUIData() {
+    const cur = state.market.selectedStockUI;
+    const cfg = state.market.stocks[cur];
+    if (!cfg) return;
+    txtLast.textContent = `Last: $${cfg.lastSeen.toLocaleString()}`;
+    txtLow.textContent = `$${cfg.minSeen === Infinity ? 0 : cfg.minSeen.toLocaleString()}`;
+    txtHigh.textContent = `$${cfg.maxSeen === -Infinity ? 0 : cfg.maxSeen.toLocaleString()}`;
+    if (document.activeElement !== inpBuy) inpBuy.value = cfg.buy || '';
+    if (document.activeElement !== inpSell) inpSell.value = cfg.sell || '';
+    chkStockEnable.checked = cfg.enabled;
+  }
+
+  stockPicker.addEventListener('change', () => {
+    state.market.selectedStockUI = stockPicker.value;
+    renderStockUIData();
+  });
+
+  inpBuy.addEventListener('input', e => {
+    const cfg = state.market.stocks[state.market.selectedStockUI];
+    if (cfg) cfg.buy = parseFloat(e.target.value) || 0;
+  });
+
+  inpSell.addEventListener('input', e => {
+    const cfg = state.market.stocks[state.market.selectedStockUI];
+    if (cfg) cfg.sell = parseFloat(e.target.value) || 0;
+  });
+
+  chkStockEnable.addEventListener('change', e => {
+    const cfg = state.market.stocks[state.market.selectedStockUI];
+    if (cfg) cfg.enabled = e.target.checked;
+  });
+
+  // Smart range toggle
+  const smartRangeControls = panel.querySelector('#smart-range-controls');
+  panel.querySelector('#chk-market-smart').addEventListener('change', e => {
+    state.market.smartRange = e.target.checked;
+    smartRangeControls.style.display = e.target.checked ? 'block' : 'none';
+  });
+
+  panel.querySelector('#rng-smart-buy').addEventListener('input', e => {
+    state.market.smartBuyPct = parseInt(e.target.value, 10);
+    panel.querySelector('#lbl-smart-buy').textContent = `${state.market.smartBuyPct}%`;
+  });
+
+  panel.querySelector('#rng-smart-sell').addEventListener('input', e => {
+    state.market.smartSellPct = parseInt(e.target.value, 10);
+    panel.querySelector('#lbl-smart-sell').textContent = `${state.market.smartSellPct}%`;
+  });
+
+  panel.querySelector('#chk-market-cycle').addEventListener('change', e => state.market.cycleAll = e.target.checked);
+  panel.querySelector('#chk-market-sellall').addEventListener('change', e => state.market.sellAllShares = e.target.checked);
+  panel.querySelector('#rng-batch').addEventListener('input', e => {
+    state.market.batchBuyCount = parseInt(e.target.value, 10);
+    panel.querySelector('#lbl-batch').textContent = `${state.market.batchBuyCount}x per tick`;
+  });
+
+  // --- CLICKER & UPGRADES INPUT BINDINGS ---
   const rngClick = panel.querySelector('#rng-click');
   const lblClick = panel.querySelector('#lbl-click');
   rngClick.addEventListener('input', e => {
     state.clickDelay = parseInt(e.target.value, 10);
-    lblClick.textContent = `${state.clickDelay}ms (~${Math.round(1000 / state.clickDelay)} CPS)`;
-    if (state.master) startLoops();
+    lblClick.textContent = `${state.clickDelay}ms`;
   });
+
+  const rngBurst = panel.querySelector('#rng-burst');
+  const lblBurst = panel.querySelector('#lbl-burst');
+  rngBurst.addEventListener('input', e => {
+    state.clicker.burstMultiplier = parseInt(e.target.value, 10);
+    lblBurst.textContent = `${state.clicker.burstMultiplier}x`;
+  });
+
+  panel.querySelector('#chk-jitter').addEventListener('change', e => state.clicker.useJitter = e.target.checked);
+  panel.querySelector('#chk-autoCollectLevel').addEventListener('change', e => state.clicker.autoCollectLevel = e.target.checked);
 
   const rngMini = panel.querySelector('#rng-mini');
   const lblMini = panel.querySelector('#lbl-mini');
@@ -466,80 +722,98 @@
     if (state.master) startLoops();
   });
 
-  panel.querySelector('#inp-tsla-buy').addEventListener('input', e => state.marketLimits.Tesla.buy = parseFloat(e.target.value) || 0);
-  panel.querySelector('#inp-tsla-sell').addEventListener('input', e => state.marketLimits.Tesla.sell = parseFloat(e.target.value) || 0);
-  panel.querySelector('#inp-btc-buy').addEventListener('input', e => state.marketLimits.Bitcoin.buy = parseFloat(e.target.value) || 0);
-  panel.querySelector('#inp-btc-sell').addEventListener('input', e => state.marketLimits.Bitcoin.sell = parseFloat(e.target.value) || 0);
+  const rngMail = panel.querySelector('#rng-mail');
+  const lblMail = panel.querySelector('#lbl-mail');
+  rngMail.addEventListener('input', e => {
+    state.mailDelay = parseInt(e.target.value, 10);
+    lblMail.textContent = `${state.mailDelay}ms`;
+    if (state.master) startLoops();
+  });
 
-  // Automation Checkboxes
-  const featureKeys = Object.keys(state.features);
-  featureKeys.forEach(key => {
+  panel.querySelector('#inp-reserve-stim').addEventListener('input', e => state.upgrades.reserveStim = parseFloat(e.target.value) || 0);
+  panel.querySelector('#chk-allowOceanReset').addEventListener('change', e => state.upgrades.allowOceanReset = e.target.checked);
+  panel.querySelector('#chk-mail-survey').addEventListener('change', e => state.mail.autoSurvey = e.target.checked);
+  panel.querySelector('#chk-mail-actions').addEventListener('change', e => state.mail.autoActions = e.target.checked);
+  panel.querySelector('#inp-mail-traps').addEventListener('input', e => state.mail.trapsBlacklist = e.target.value);
+
+  // Feature checkboxes
+  const featureList = [
+    'mainBtn', 'upgrades', 'pressBtn', 'pressCollect',
+    'lootBoxes', 'chickenFeed', 'kinderEggs', 'duolingo',
+    'powerups', 'tradeMarket', 'mailInbox'
+  ];
+  featureList.forEach(key => {
     const el = panel.querySelector(`#chk-${key}`);
-    if (el) {
-      el.addEventListener('change', e => state.features[key] = e.target.checked);
-    }
+    if (el) el.addEventListener('change', e => state.features[key] = e.target.checked);
   });
 
   panel.querySelector('#btn-feat-all').addEventListener('click', () => {
-    featureKeys.forEach(key => {
-      if (key === 'allowOceanReset') return;
-      state.features[key] = true;
-      const el = panel.querySelector(`#chk-${key}`);
+    featureList.forEach(k => {
+      state.features[k] = true;
+      const el = panel.querySelector(`#chk-${k}`);
       if (el) el.checked = true;
     });
   });
 
   panel.querySelector('#btn-feat-none').addEventListener('click', () => {
-    featureKeys.forEach(key => {
-      state.features[key] = false;
-      const el = panel.querySelector(`#chk-${key}`);
+    featureList.forEach(k => {
+      state.features[k] = false;
+      const el = panel.querySelector(`#chk-${k}`);
       if (el) el.checked = false;
     });
   });
 
-  // Mute Checkboxes
+  // Mute checkboxes
   const muteKeys = Object.keys(state.mute);
-  muteKeys.forEach(key => {
-    const el = panel.querySelector(`#mute-${key}`);
-    if (el) {
-      el.addEventListener('change', e => state.mute[key] = e.target.checked);
-    }
+  muteKeys.forEach(k => {
+    const el = panel.querySelector(`#mute-${k}`);
+    if (el) el.addEventListener('change', e => state.mute[k] = e.target.checked);
   });
 
   panel.querySelector('#btn-mute-all').addEventListener('click', () => {
-    muteKeys.forEach(key => {
-      state.mute[key] = true;
-      const el = panel.querySelector(`#mute-${key}`);
+    muteKeys.forEach(k => {
+      state.mute[k] = true;
+      const el = panel.querySelector(`#mute-${k}`);
       if (el) el.checked = true;
     });
   });
 
   panel.querySelector('#btn-mute-none').addEventListener('click', () => {
-    muteKeys.forEach(key => {
-      state.mute[key] = false;
-      const el = panel.querySelector(`#mute-${key}`);
+    muteKeys.forEach(k => {
+      state.mute[k] = false;
+      const el = panel.querySelector(`#mute-${k}`);
       if (el) el.checked = false;
     });
   });
 
+  // Panel Opacity Slider
+  const rngOpacity = panel.querySelector('#rng-opacity');
+  const lblOpacity = panel.querySelector('#lbl-opacity');
+  rngOpacity.addEventListener('input', e => {
+    state.panelOpacity = parseInt(e.target.value, 10);
+    lblOpacity.textContent = `${state.panelOpacity}%`;
+    panel.style.background = `rgba(15, 23, 42, ${state.panelOpacity / 100})`;
+  });
+
   // Minimize
   let minimized = false;
-  const cfgBody = panel.querySelector('#cfg-body');
   const minBtn = panel.querySelector('#cfg-min');
   minBtn.addEventListener('click', () => {
     minimized = !minimized;
-    cfgBody.style.display = minimized ? 'none' : 'block';
+    tabs.forEach(t => panel.querySelector(`#view-${t}`).style.display = minimized ? 'none' : (t === state.activeTab ? 'block' : 'none'));
     minBtn.textContent = minimized ? '+' : '—';
   });
 
-  // Center on screen helper
+  // Initial stock dropdown population
+  updateMarketStockPickerUI();
+
+  // Hotkeys: ` toggles Master; Shift + ` recenters panel
   function recenterPanel() {
     panel.style.right = 'auto';
     panel.style.left = `${Math.max(10, (window.innerWidth - panel.offsetWidth) / 2)}px`;
     panel.style.top = `${Math.max(10, (window.innerHeight - panel.offsetHeight) / 2)}px`;
   }
 
-  // Hotkeys: ` toggles Master; Shift + ` recenters panel
   function handleKeyDown(e) {
     if (e.code === 'Backquote' && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {
       e.preventDefault();
@@ -552,7 +826,7 @@
   }
   window.addEventListener('keydown', handleKeyDown);
 
-  // Global Export
+  // Global Export & Cleanup
   window.__stimSuite = {
     state,
     setTab,
@@ -568,6 +842,5 @@
     }
   };
 
-  console.log("%c [Stimulation Suite] Injected successfully at top-right!", "color: #38bdf8; font-weight: bold; font-size: 14px;");
-  console.log("Tip: Click & drag the top header bar to move the panel anywhere. Press Shift + ` to re-center it.");
+  console.log("%c [Stimulation Suite] Loaded with Multi-Stock Trading & Granular Settings!", "color: #38bdf8; font-weight: bold; font-size: 14px;");
 })();
