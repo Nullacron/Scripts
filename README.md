@@ -1,17 +1,4 @@
-# Scripts
-
 This repository is a small collection of utilities and automation scripts I've put together for game modding, config generation, and browser automation. Most of the files here were created by me or with the help of AI, and they focus on practical tools for Source Engine workflows and a few quality-of-life helpers for web-based games.
-
-The goal is to make repetitive tasks easier: packaging mod files into VPKs, converting data dumps into clean config files, and automating browser-based gameplay loops where manual repetition would be tedious.
-
-## Repository overview
-
-The scripts in this repo are split between two main areas:
-
-- Source Engine tools for modding and config generation
-- Browser automation utilities for game tasks and repetitive actions
-
-These are lightweight, task-focused scripts rather than large applications, intended to save time during mod development or gameplay automation.
 
 ## Files
 
@@ -30,9 +17,3 @@ Formats SAR JSON dump data into readable `.cfg` files in the same spirit as the 
 ## Usage
 
 These scripts are intended to be practical, direct tools rather than polished end-user applications. Some are Windows PowerShell utilities for Source Engine modding, while others are browser automation scripts meant to assist with repetitive in-game tasks.
-
-The repository is still evolving, and the scripts may be updated over time as workflows change or new utilities are added.
-
-## Notes
-
-Most of these scripts were created by me or with the help of AI, and they reflect a hands-on approach to solving common tasks in a fast and practical way.
