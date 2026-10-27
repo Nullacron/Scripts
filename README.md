@@ -1,19 +1,22 @@
-This repository is a small collection of utilities and automation scripts I've put together for game modding, config generation, and browser automation. Most of the files here were created by me or with the help of AI, and they focus on practical tools for Source Engine workflows and a few quality-of-life helpers for web-based games.
+This repository is a small collection of utilities and automation scripts I've put together for game modding, config generation, and browser automation. Most of the files here were created by me or with help from other modding resources and personal scripts over time.
 
 ## Files
 
-### `AutoVPK.ps1`
-Creates a ready-to-use `pak01_dir.vpk` from a mod folder using VPKEdit CLI. It helps streamline the workflow of packaging a Source Engine mod by letting you select a folder, choose a destination, remember your last output path, and automatically remove outdated `pak01*.vpk` files before rebuilding. This is useful when iterating on a mod and needing a quick, repeatable packaging step.
+### [AutoVPK.ps1](/AutoVPK.ps1)
+Creates a ready-to-use `pak01_dir.vpk` from a mod folder using VPKEdit CLI. It helps streamline the workflow of packaging a Source Engine mod by letting you select a folder, choose a destination, remember the output path, and generate the final VPK with minimal manual work.
 
-### `CVARLIST Format Tool.ps1`
-Converts Source Engine `CVARLIST` CSV exports into clean, organized `.cfg` files. It supports filtering by command type, handling flags, grouping entries into sections, and customizing naming and output structure. This is especially helpful when working with large lists of console variables and wanting more readable, usable config files instead of raw export data.
+### [CVAR Dump Format Tool (P2CE).ps1](/CVAR%20Dump%20Format%20Tool%20(P2CE).ps1)
+Converts P2CE dump exports into clean, organized `.cfg` files. It supports filtering by command type, grouping entries into sections, and customizing naming and output formatting for easier mod configuration work.
 
-### `NealFun Stimulation Script.js`
-A browser userscript for the NealFun “Stimulation” game. It adds a control panel that automates repeated gameplay tasks such as clicking, minigame actions, upgrades, stock trading, inbox handling, and muting audio. It is designed to reduce the amount of manual clicking and micromanagement required during long play sessions.
+### [CVAR Dump Format Tool (SAR).ps1](/CVAR%20Dump%20Format%20Tool%20(SAR).ps1)
+Formats SAR JSON dump data into readable `.cfg` files in the same spirit as the Source Engine formatter, but tailored to Source Engine SAR plugin command dumps. It can separate game commands from SAR-specific commands and organize them into cleaner output.
 
-### `SAR Dump Format Tool.ps1`
-Formats SAR JSON dump data into readable `.cfg` files in the same spirit as the CVARLIST formatter, but tailored to Source Engine SAR plugin command dumps. It can separate game commands from SAR-specific entries, tag SAR commands, and generate organized output files that are easier to review and use. This is useful for developers working with large command dumps that need to be turned into structured config content.
+### [CVAR Dump Format Tool (Source).ps1](/CVAR%20Dump%20Format%20Tool%20(Source).ps1)
+Converts Source Engine `CVARLIST` CSV exports into clean, organized `.cfg` files. It supports filtering by command type, handling flags, grouping entries into sections, and customizing naming and output formatting.
+
+### [NealFun Stimulation Script.js](/NealFun%20Stimulation%20Script.js)
+A browser userscript for the NealFun “Stimulation” game. It adds a control panel that automates repeated gameplay tasks such as clicking, minigame actions, upgrades, stock trading, inbox handling, and other repetitive actions to help run the game more efficiently.
 
 ## Usage
 
-These scripts are intended to be practical, direct tools rather than polished end-user applications. Some are Windows PowerShell utilities for Source Engine modding, while others are browser automation scripts meant to assist with repetitive in-game tasks.
+These scripts are intended to be practical, direct tools rather than polished end-user applications. Some are Windows PowerShell utilities for Source Engine modding, while others are browser automation scripts for web games and tools. They assume some familiarity with the underlying workflows and are meant to speed up repetitive tasks rather than replace the full modding or scripting process.
