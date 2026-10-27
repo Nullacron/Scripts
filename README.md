@@ -17,6 +17,5 @@ Converts Source Engine `CVARLIST` CSV exports into clean, organized `.cfg` files
 ### [NealFun Stimulation Script.js](/NealFun%20Stimulation%20Script.js)
 A browser userscript for the NealFun “Stimulation” game. It adds a control panel that automates repeated gameplay tasks such as clicking, minigame actions, upgrades, stock trading, inbox handling, and other repetitive actions to help run the game more efficiently.
 
-## Usage
-
-These scripts are intended to be practical, direct tools rather than polished end-user applications. Some are Windows PowerShell utilities for Source Engine modding, while others are browser automation scripts for web games and tools. They assume some familiarity with the underlying workflows and are meant to speed up repetitive tasks rather than replace the full modding or scripting process.
+## Note
+These scripts are not meant to be polished end-use applications, their just scripts that I made with AI to make things easier for me to do stuff.
